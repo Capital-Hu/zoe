@@ -32,7 +32,7 @@ public class LLMTest {
      */
     @Autowired
     private OpenAiChatModel openAiChatModel;
-
+    //private ChatLanguageModel chatLanguageModel;
     @Test
     public void testSpringBoot() {
         //向模型提问
