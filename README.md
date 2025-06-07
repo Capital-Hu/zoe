@@ -1,13 +1,12 @@
-硅谷小智（医疗版）
+# 硅谷小智（医疗版）
+
 尚硅谷-环环
 
-前置知识
-Java基础
+## 前置知识
 
-Maven
+- Java基础
+- Maven
+- MySQL
 
-MySQL
-
-SSM
-
-SpringBoot
+- SSM
+- SpringBoot
