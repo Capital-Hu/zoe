@@ -16,4 +16,18 @@ public class PromptTest {
         String answer = separateChatAssistant.chat(3,"我是谁，今天几号");
         System.out.println(answer);
     }
+
+
+    @Test
+    public void testSystemMessage1() {
+        String answer = separateChatAssistant.chat(4,"我是谁，今天几号");
+        System.out.println(answer);
+    }
+
+
+    @Test
+    public void testSystemMessage2() {
+        String answer = separateChatAssistant.chat(5,"我是谁，今天几号");
+        System.out.println(answer);
+    }
 }

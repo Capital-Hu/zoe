@@ -21,7 +21,9 @@ public interface SeparateChatAssistant {
      * @param userMessage 用户消息
      * @return
      */
-    @SystemMessage("我是你的儿子，请用邯郸话回答问题。")//切换系统提示词，会丢到以前的记忆
+    //@SystemMessage("我是你的儿子，请用邯郸话回答问题。")//切换系统提示词，会丢到以前的记忆
     //@SystemMessage("你是我的儿子，请用东北话回答问题。")//系统消息提示词
+    //@SystemMessage("你是我的好朋友，请用东北话回答问题。今天是{{current_date}}")//系统消息提示词
+    @SystemMessage(fromResource = "my-prompt-template.txt")
     String chat(@MemoryId int memoryId, @UserMessage String userMessage);
 }
