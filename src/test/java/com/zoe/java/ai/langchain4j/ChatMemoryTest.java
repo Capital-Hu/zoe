@@ -86,8 +86,8 @@ public class ChatMemoryTest {
     private SeparateChatAssistant separateChatAssistant;
     @Test
     public void testChatMemory5() {
-        String answer1 = separateChatAssistant.chat(1,"我是zoe");
-        System.out.println(answer1);
+//        String answer1 = separateChatAssistant.chat(1,"我是zoe");
+//        System.out.println(answer1);//这样也能通过数据库知道我是zoe
         String answer2 = separateChatAssistant.chat(1,"我是谁");
         System.out.println(answer2);
         String answer3 = separateChatAssistant.chat(2,"我是谁");
