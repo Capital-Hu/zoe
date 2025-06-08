@@ -1,5 +1,6 @@
 package com.zoe.java.al.langchain4j;
 
+import dev.langchain4j.model.ollama.OllamaChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,15 +29,29 @@ public class LLMTest {
     }
 
     /**
-     * 整合SpringBoot
+     * 整合SpringBoot接入LLM的api
      */
     @Autowired
     private OpenAiChatModel openAiChatModel;
-    //private ChatLanguageModel chatLanguageModel;
+    //private ChatLanguageModel chatLanguageModel;//这个是父类
     @Test
     public void testSpringBoot() {
         //向模型提问
         String answer = openAiChatModel.chat("你是谁");
+        //输出结果
+        System.out.println(answer);
+    }
+
+    /**
+     * ollama接入本地模型
+     */
+    @Autowired
+    //private ChatLanguageModel chatLanguageModel;
+    private OllamaChatModel ollamaChatModel;
+    @Test
+    public void testOllama() {
+        //向模型提问
+        String answer = ollamaChatModel.chat("你是谁");
         //输出结果
         System.out.println(answer);
     }
