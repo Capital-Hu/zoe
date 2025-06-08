@@ -1,4 +1,4 @@
-package com.zoe;
+package com.zoe.java.ai.langchain4j;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;

@@ -1,4 +1,4 @@
-package com.zoe.java.al.langchain4j;
+package com.zoe.java.ai.langchain4j;
 
 import dev.langchain4j.community.model.dashscope.QwenChatModel;
 import dev.langchain4j.community.model.dashscope.WanxImageModel;
