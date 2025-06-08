@@ -2,6 +2,7 @@ package com.zoe.java.ai.langchain4j;
 
 import com.zoe.java.ai.langchain4j.assistant.Assistant;
 import com.zoe.java.ai.langchain4j.assistant.MemoryChatAssistant;
+import com.zoe.java.ai.langchain4j.assistant.SeparateChatAssistant;
 import dev.langchain4j.community.model.dashscope.QwenChatModel;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -72,12 +73,24 @@ public class ChatMemoryTest {
 
     @Autowired
     private MemoryChatAssistant memoryChatAssistant;
-
     @Test
     public void testChatMemory4() {
         String answer1 = memoryChatAssistant.chat("我是zoe");
         System.out.println(answer1);
         String answer2 = memoryChatAssistant.chat("我是谁");
         System.out.println(answer2);
+    }
+
+
+    @Autowired
+    private SeparateChatAssistant separateChatAssistant;
+    @Test
+    public void testChatMemory5() {
+        String answer1 = separateChatAssistant.chat(1,"我是zoe");
+        System.out.println(answer1);
+        String answer2 = separateChatAssistant.chat(1,"我是谁");
+        System.out.println(answer2);
+        String answer3 = separateChatAssistant.chat(2,"我是谁");
+        System.out.println(answer3);
     }
 }
