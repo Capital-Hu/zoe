@@ -8,7 +8,8 @@ import static dev.langchain4j.service.spring.AiServiceWiringMode.EXPLICIT;
 @AiService(
         wiringMode = EXPLICIT,
         chatModel = "qwenChatModel",
-        chatMemoryProvider = "chatMemoryProviderZoe")
+        chatMemoryProvider = "chatMemoryProviderZoe",
+    tools = "appointmentTools") //tools配置
 public interface ZoeAgent {
 	
 	@SystemMessage(fromResource = "zoe-prompt-template.txt")
