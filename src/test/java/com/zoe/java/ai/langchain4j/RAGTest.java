@@ -90,7 +90,7 @@ public class RAGTest {
 
         //使用FileSystemDocumentLoader读取指定目录下的知识库文档
         //并使用默认的文档解析器对文档进行解析(TextDocumentParser)
-        Document document = FileSystemDocumentLoader.loadDocument("E:/knowledge/人工智能.md");
+        Document document = FileSystemDocumentLoader.loadDocument("C:/Users/a/Desktop/小智医疗/knowledge/人工智能.md");
 
         //为了简单起见，我们暂时使用基于内存的向量存储
         InMemoryEmbeddingStore<TextSegment> embeddingStore = new InMemoryEmbeddingStore<>();
