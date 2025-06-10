@@ -10,7 +10,7 @@ import static dev.langchain4j.service.spring.AiServiceWiringMode.EXPLICIT;
         chatModel = "qwenChatModel",
         chatMemoryProvider = "chatMemoryProviderZoe",
         tools = "appointmentTools", //tools配置
-        contentRetriever = "contentRetrieverXiaozhi" //配置向量存储
+        contentRetriever = "contentRetrieverzoe" //配置向量存储
 )
 
 
