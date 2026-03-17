@@ -1,34 +1,56 @@
 <template>
   <div class="app-layout">
-    <div class="sidebar">
-      <div class="logo-section">
-        <img src="@/assets/vue.svg" alt="Zoe大模型" width="160" height="160" />
-        <span class="logo-text">Zoe大模型（医疗版）</span>
+    <aside class="sidebar">
+      <div class="brand-card">
+        <div class="brand-mark">Z</div>
+        <div class="brand-copy">
+          <strong>Zoe 医疗助手</strong>
+          <span>智能分诊与就诊陪伴</span>
+        </div>
       </div>
+
       <div v-if="currentUser" class="user-info">
-        当前用户：{{ currentUser.username }}
+        <span class="user-label">当前用户</span>
+        <strong>{{ currentUser.username }}</strong>
       </div>
-      <el-button class="new-chat-button" @click="newChat">
-        <i class="fa-solid fa-plus"></i>
-        &nbsp;新会话
-      </el-button>
-      <el-button
-        class="compress-memory-button"
-        @click="compressMemory"
-        :loading="isCompressing"
-      >
-        <i class="fa-solid fa-box-archive"></i>
-        &nbsp;压缩记忆
-      </el-button>
-      <el-button v-if="currentUser" class="logout-button" @click="logout">
-        <i class="fa-solid fa-right-from-bracket"></i>
-        &nbsp;退出登录
-      </el-button>
-    </div>
+
+      <div v-if="currentUser" class="action-group">
+        <el-button class="new-chat-button" @click="newChat">+ 新会话</el-button>
+        <el-button class="compress-memory-button" @click="compressMemory" :loading="isCompressing">
+          压缩记忆
+        </el-button>
+      </div>
+
+      <div v-if="currentUser" class="sessions-panel">
+        <div class="sessions-header">
+          <span>历史会话</span>
+          <el-button text size="small" @click="loadSessions" :disabled="isSessionsLoading">刷新</el-button>
+        </div>
+        <div class="sessions-list" v-loading="isSessionsLoading">
+          <button
+            v-for="session in sessions"
+            :key="session.memoryId"
+            class="session-item"
+            :class="{ active: String(session.memoryId) === String(uuid) }"
+            @click="openSession(session.memoryId)"
+          >
+            <div class="session-title">{{ session.title || '新会话' }}</div>
+            <div class="session-meta">
+              <span>{{ session.turns }} 轮</span>
+              <span>{{ formatTime(session.updatedAt) }}</span>
+            </div>
+          </button>
+          <div v-if="!sessions.length && !isSessionsLoading" class="empty-sessions">暂无历史会话</div>
+        </div>
+      </div>
+
+      <el-button v-if="currentUser" class="logout-button" @click="logout">退出登录</el-button>
+    </aside>
+
     <div class="main-content">
       <div v-if="!currentUser" class="auth-wrapper">
         <el-card class="auth-card">
-          <h3>{{ authMode === 'login' ? '登录' : '注册' }}</h3>
+          <h3>{{ authMode === 'login' ? '欢迎回来' : '创建账户' }}</h3>
           <el-input v-model="authForm.username" placeholder="用户名" class="auth-input" />
           <el-input v-model="authForm.password" placeholder="密码（至少6位）" show-password class="auth-input" />
           <el-input
@@ -46,48 +68,42 @@
           </el-button>
         </el-card>
       </div>
-      <div class="chat-container">
+
+      <div class="chat-container" v-loading="isSessionOpening">
         <template v-if="currentUser">
-        <div class="message-list" ref="messaggListRef">
-          <div
+          <div class="chat-head">
+            <div>
+              <h2>智能问诊会话</h2>
+              <p>描述症状后可直接查询科室与号源</p>
+            </div>
+            <span class="session-badge">会话ID: {{ uuid }}</span>
+          </div>
+
+          <div class="message-list" ref="messaggListRef">
+            <div
               v-for="(message, index) in messages"
               :key="index"
-              :class="
-              message.isUser ? 'message user-message' : 'message bot-message'
-            "
-          >
-            <!-- 会话图标 -->
-            <i
-                :class="
-                message.isUser
-                  ? 'fa-solid fa-user message-icon'
-                  : 'fa-solid fa-robot message-icon'
-              "
-            ></i>
-            <!-- 会话内容 -->
-            <span class="message-content">
-              <span v-html="message.content"></span>
-              <!-- loading -->
-              <span
-                  class="loading-dots"
-                  v-if="message.isThinking || message.isTyping"
-              >
-                <span class="dot"></span>
-                <span class="dot"></span>
+              :class="message.isUser ? 'message user-message' : 'message bot-message'"
+            >
+              <span class="avatar">{{ message.isUser ? '我' : 'Z' }}</span>
+              <span class="message-content">
+                <span v-html="message.content"></span>
+                <span class="loading-dots" v-if="message.isThinking || message.isTyping">
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                </span>
               </span>
-            </span>
+            </div>
           </div>
-        </div>
-        <div class="input-container">
-          <el-input
+
+          <div class="input-container">
+            <el-input
               v-model="inputMessage"
-              placeholder="请输入消息"
+              placeholder="请输入你的症状、就诊需求或预约问题"
               @keyup.enter="sendMessage"
-          ></el-input>
-          <el-button @click="sendMessage" :disabled="isSending" type="primary">
-            发送
-          </el-button>
-        </div>
+            />
+            <el-button @click="sendMessage" :disabled="isSending" type="primary">发送</el-button>
+          </div>
         </template>
       </div>
     </div>
@@ -104,9 +120,12 @@ const messaggListRef = ref();
 const isSending = ref(false);
 const isCompressing = ref(false);
 const isAuthSubmitting = ref(false);
-const uuid = ref();
+const isSessionsLoading = ref(false);
+const isSessionOpening = ref(false);
+const uuid = ref('');
 const inputMessage = ref('');
 const messages = ref([]);
+const sessions = ref([]);
 const currentUser = ref(null);
 const authMode = ref('login');
 const authForm = ref({
@@ -115,14 +134,14 @@ const authForm = ref({
   confirmPassword: '',
 });
 
-onMounted(() => {
+onMounted(async () => {
   loadAuthUser();
+  watch(messages, () => scrollToBottom(), { deep: true });
   if (currentUser.value) {
     initUUID();
-    hello();
+    await loadSessions();
+    await openSession(uuid.value, true);
   }
-  // 移除 setInterval，改用手动滚动
-  watch(messages, () => scrollToBottom(), { deep: true });
 });
 
 const scrollToBottom = () => {
@@ -149,22 +168,17 @@ const sendMessage = () => {
 
 const sendRequest = (message) => {
   isSending.value = true;
-  const userMsg = {
+  messages.value.push({
     isUser: true,
     content: message,
     isTyping: false,
     isThinking: false,
-  };
-  // 第一条默认发送的用户消息”你好“不放入会话列表
-  if (messages.value.length > 0) {
-    messages.value.push(userMsg);
-  }
+  });
 
-  // 添加机器人加载消息
   const botMsg = {
     isUser: false,
-    content: '', // 增量填充
-    isTyping: true, // 显示加载动画
+    content: '',
+    isTyping: true,
     isThinking: false,
   };
   messages.value.push(botMsg);
@@ -172,55 +186,61 @@ const sendRequest = (message) => {
   scrollToBottom();
 
   axios
-      .post('/api/zoe/chat', { userId: currentUser.value.userId, memoryId: String(uuid.value), message }, {
+    .post(
+      '/api/zoe/chat',
+      { userId: currentUser.value.userId, memoryId: String(uuid.value), message },
+      {
         responseType: 'stream',
         onDownloadProgress: (e) => {
           const fullText = e.event.target.responseText;
-          let newText = fullText.substring(lastMsg.content.length);
+          const newText = fullText.substring(lastMsg.content.length);
           lastMsg.content += newText;
-          console.log(lastMsg);
-          scrollToBottom(); // 实时滚动
+          scrollToBottom();
         },
-      })
-      .then(() => {
-        messages.value.at(-1).isTyping = false;
-        isSending.value = false;
-      })
-      .catch((error) => {
-        console.error('流式错误:', error);
-        messages.value.at(-1).content = '请求失败，请重试';
-        messages.value.at(-1).isTyping = false;
-        isSending.value = false;
-      });
+      }
+    )
+    .then(() => {
+      messages.value.at(-1).isTyping = false;
+      loadSessions();
+      isSending.value = false;
+    })
+    .catch((error) => {
+      console.error('流式错误:', error);
+      messages.value.at(-1).content = '请求失败，请重试';
+      messages.value.at(-1).isTyping = false;
+      isSending.value = false;
+    });
 };
 
-// 初始化 UUID
 const initUUID = () => {
   let storedUUID = localStorage.getItem(memoryKey());
   if (!storedUUID) {
-    storedUUID = uuidToNumber(uuidv4());
+    storedUUID = String(uuidToNumber(uuidv4()));
     localStorage.setItem(memoryKey(), storedUUID);
   }
-  uuid.value = storedUUID;
+  uuid.value = String(storedUUID);
 };
 
 const memoryKey = () => {
   return currentUser.value ? `chat_memory_${currentUser.value.userId}` : 'user_uuid';
 };
 
-const uuidToNumber = (uuid) => {
+const uuidToNumber = (value) => {
   let number = 0;
-  for (let i = 0; i < uuid.length && i < 6; i++) {
-    const hexValue = uuid[i];
+  for (let i = 0; i < value.length && i < 6; i++) {
+    const hexValue = value[i];
     number = number * 16 + (parseInt(hexValue, 16) || 0);
   }
   return number % 1000000;
 };
 
-const newChat = () => {
-  console.log('开始新会话');
-  localStorage.removeItem(memoryKey());
-  window.location.reload();
+const newChat = async () => {
+  const nextId = String(uuidToNumber(uuidv4()));
+  uuid.value = nextId;
+  localStorage.setItem(memoryKey(), nextId);
+  messages.value = [];
+  hello();
+  await loadSessions();
 };
 
 const compressMemory = () => {
@@ -262,6 +282,68 @@ const loadAuthUser = () => {
   }
 };
 
+const loadSessions = async () => {
+  if (!currentUser.value) return;
+  isSessionsLoading.value = true;
+  try {
+    const res = await axios.get('/api/zoe/sessions', {
+      params: { userId: currentUser.value.userId },
+    });
+    sessions.value = (res.data?.sessions || []).map((item) => ({
+      memoryId: String(item.memoryId),
+      title: item.title,
+      turns: item.turns || 0,
+      updatedAt: item.updatedAt,
+    }));
+  } catch (error) {
+    console.error('加载会话列表失败:', error);
+    ElMessage.error('加载历史会话失败');
+  } finally {
+    isSessionsLoading.value = false;
+  }
+};
+
+const openSession = async (memoryId, silent = false) => {
+  if (!currentUser.value || !memoryId) return;
+  uuid.value = String(memoryId);
+  localStorage.setItem(memoryKey(), uuid.value);
+  isSessionOpening.value = true;
+  try {
+    const res = await axios.get(`/api/zoe/sessions/${uuid.value}`, {
+      params: { userId: currentUser.value.userId },
+    });
+    messages.value = (res.data?.messages || []).map((m) => ({
+      isUser: !!m.isUser,
+      content: m.content || '',
+      isTyping: false,
+      isThinking: false,
+    }));
+    if (!messages.value.length) {
+      hello();
+    }
+  } catch {
+    messages.value = [];
+    if (!silent) {
+      ElMessage.warning('会话不存在，已为你创建新会话');
+    }
+    hello();
+  } finally {
+    isSessionOpening.value = false;
+  }
+};
+
+const formatTime = (value) => {
+  if (!value) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--';
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
 const switchAuthMode = () => {
   authMode.value = authMode.value === 'login' ? 'register' : 'login';
 };
@@ -286,7 +368,8 @@ const submitAuth = async () => {
     localStorage.setItem('auth_user', JSON.stringify(res.data));
     initUUID();
     messages.value = [];
-    hello();
+    await loadSessions();
+    await openSession(uuid.value, true);
     ElMessage.success(authMode.value === 'login' ? '登录成功' : '注册成功');
   } catch (err) {
     console.error(err);
@@ -301,7 +384,9 @@ const logout = () => {
   if (currentUser.value) {
     localStorage.removeItem(`chat_memory_${currentUser.value.userId}`);
   }
-  window.location.reload();
+  messages.value = [];
+  sessions.value = [];
+  currentUser.value = null;
 };
 </script>
 
@@ -309,61 +394,168 @@ const logout = () => {
 .app-layout {
   display: flex;
   height: 100vh;
+  background:
+    radial-gradient(circle at 10% 10%, rgba(26, 188, 156, 0.16), transparent 35%),
+    radial-gradient(circle at 85% 18%, rgba(245, 166, 35, 0.16), transparent 36%),
+    #f6f8f3;
 }
 
 .sidebar {
-  width: 220px;
-  background-color: #f9f9fb;
-  padding: 25px;
+  width: 300px;
+  background: linear-gradient(170deg, #fdfdf8, #eef4ea);
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  border-right: 1px solid #ddd;
+  gap: 16px;
+  border-right: 1px solid #d7ded1;
 }
 
-.logo-section {
+.brand-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 14px;
+  background: #ffffffcc;
+  border: 1px solid #dbe7d4;
+}
+
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #11998e, #38ef7d);
+  color: #fff;
+  font-weight: 800;
+  font-size: 18px;
+}
+
+.brand-copy {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  line-height: 1.2;
 }
 
-.logo-text {
-  font-size: 20px;
-  font-weight: bold;
-  margin-top: 12px;
-  color: #333;
+.brand-copy strong {
+  color: #1f3a2f;
+}
+
+.brand-copy span {
+  font-size: 12px;
+  color: #5a6b61;
 }
 
 .user-info {
-  margin-top: 10px;
-  font-size: 14px;
-  color: #4a4a4a;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #ffffffa8;
+}
+
+.user-label {
+  font-size: 12px;
+  color: #6f8076;
+}
+
+.action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.action-group :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 
 .new-chat-button {
   width: 100%;
-  margin-top: 50px;
-  background: linear-gradient(to right, #4facfe, #00f2fe);
+  margin-top: 4px;
+  background: linear-gradient(120deg, #0ba360, #3cba92);
   color: white;
   border: none;
-  transition: transform 0.2s ease;
-}
-
-.new-chat-button:hover {
-  transform: scale(1.03);
 }
 
 .compress-memory-button {
   width: 100%;
-  margin-top: 12px;
-  background: linear-gradient(to right, #36d1dc, #5b86e5);
+  background: linear-gradient(120deg, #f2994a, #f2c94c);
   color: white;
   border: none;
 }
 
 .logout-button {
   width: 100%;
-  margin-top: 12px;
+  margin-top: auto;
+}
+
+.sessions-panel {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  border-radius: 14px;
+  background: #ffffffc9;
+  border: 1px solid #dbe7d4;
+}
+
+.sessions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #365242;
+  font-weight: 700;
+}
+
+.sessions-list {
+  margin-top: 8px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-item {
+  border: 1px solid #d4dfd0;
+  background: #f8fbf6;
+  border-radius: 10px;
+  padding: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.session-item.active {
+  border-color: #19a974;
+  box-shadow: 0 0 0 2px #19a97426;
+  background: #ecf9f2;
+}
+
+.session-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2f4a3a;
+  display: -webkit-box;
+  line-clamp: 1;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.session-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #738577;
+  display: flex;
+  justify-content: space-between;
+}
+
+.empty-sessions {
+  font-size: 12px;
+  color: #7b8a80;
+  padding: 8px 4px;
 }
 
 .auth-wrapper {
@@ -376,6 +568,8 @@ const logout = () => {
 
 .auth-card {
   width: 360px;
+  border-radius: 16px;
+  border: 1px solid #d9e5d3;
 }
 
 .auth-input {
@@ -393,63 +587,97 @@ const logout = () => {
 
 .main-content {
   flex: 1;
-  padding: 20px;
+  padding: 18px;
   overflow-y: auto;
-  background-color: #f5f7fa;
 }
 
 .chat-container {
   display: flex;
   flex-direction: column;
   height: 100%;
+  border-radius: 18px;
+  background: #ffffffde;
+  border: 1px solid #dbe5d5;
+  padding: 14px;
+}
+
+.chat-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.chat-head h2 {
+  margin: 0;
+  color: #2d4537;
+}
+
+.chat-head p {
+  margin: 3px 0 0;
+  color: #6e7f73;
+  font-size: 13px;
+}
+
+.session-badge {
+  font-size: 12px;
+  color: #527363;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: #eff8f2;
+  border: 1px solid #cfe2d6;
 }
 
 .message-list {
   flex: 1;
   overflow-y: auto;
-  padding: 15px;
-  border: 1px solid #e8e8ee;
-  border-radius: 8px;
-  background-color: #fff;
+  padding: 12px;
+  border: 1px solid #d8e4d3;
+  border-radius: 14px;
+  background-color: #fcfffb;
   margin-bottom: 15px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
   display: flex;
   flex-direction: column;
+  gap: 10px;
 }
 
 .message {
-  margin-bottom: 20px;
-  padding: 12px 20px;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 10px 14px;
+  border-radius: 12px;
   display: flex;
-  align-items: start;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 .message-content {
-  font-size: 20px;
+  font-size: 15px;
   line-height: 1.5;
   word-break: break-word;
 }
 
 .user-message {
-  max-width: 85%;
-  background-color: #a5d4ef;
+  max-width: 82%;
+  background: #ddf4e6;
   align-self: flex-end;
-  border-top-right-radius: 4px;
 }
 
 .bot-message {
-  max-width: 70%;
-  background-color: #a5d4ef;
+  max-width: 82%;
+  background: #f3f8fb;
   align-self: flex-start;
-  border-top-left-radius: 4px;
 }
 
-.message-icon {
-  margin: 0 10px;
-  font-size: 1.2em;
-  color: #555;
+.avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #2c4638;
+  background: #c9e7d6;
+  flex-shrink: 0;
 }
 
 .loading-dots {
@@ -461,7 +689,7 @@ const logout = () => {
   margin-left: 5px;
   width: 8px;
   height: 8px;
-  background-color: #000000;
+  background-color: #4c6f5c;
   border-radius: 50%;
   animation: pulse 1.2s infinite ease-in-out both;
 }
@@ -486,125 +714,43 @@ const logout = () => {
 .input-container {
   display: flex;
   align-items: center;
+  gap: 10px;
 }
 
 .input-container .el-input {
   flex: 1;
-  margin-right: 10px;
-  border-radius: 8px;
-  height: 100px; /* 设置为你想要的高度 */
 }
 
 .input-container .el-button {
-  height: 50px; /* 设置按钮高度 */
-  font-size: 16px; /* 设置字体大小 */
-  padding: 0 20px; /* 可选：调整按钮内边距 */
-  background: linear-gradient(to right, #4facfe, #00f2fe);
-  color: white;
-  border: none;
-  transition: all 0.3s ease;
+  height: 40px;
+  font-size: 14px;
 }
 
-.input-container .el-button:hover {
-  transform: scale(1.05);
-}
-
-/* 响应式设计 */
-@media (max-width: 768px) {
-  .main-content {
-    padding: 10px 0 10px 0;
-  }
-
+@media (max-width: 980px) {
   .app-layout {
     flex-direction: column;
+    height: auto;
+    min-height: 100vh;
   }
 
   .sidebar {
-    width: 100%;
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: center;
-    padding: 10px;
+    width: auto;
     border-right: none;
-    border-bottom: 1px solid #ddd;
+    border-bottom: 1px solid #d7ded1;
   }
 
-  .logo-section {
-    flex-direction: row;
-    align-items: center;
+  .sessions-panel {
+    max-height: 220px;
   }
 
-  .logo-text {
-    font-size: 18px;
-  }
-
-  .logo-section img {
-    width: 40px;
-    height: 40px;
-  }
-
-  .new-chat-button {
-    margin-right: 20px;
-    width: auto;
-    margin-top: 5px;
-  }
-
-  .compress-memory-button {
-    width: auto;
-    margin-top: 5px;
-    margin-right: 20px;
-  }
-}
-
-@media (min-width: 769px) {
   .main-content {
-    padding: 0 0 10px 10px;
+    padding: 10px;
   }
 
-  .app-layout {
-    display: flex;
-    height: 100vh;
-  }
-
-  .sidebar {
-    width: 220px;
-    background-color: #f9f9fb;
-    padding: 25px;
-    display: flex;
+  .chat-head {
     flex-direction: column;
-    align-items: center;
-    border-right: 1px solid #ddd;
-  }
-
-  .logo-section {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-  }
-
-  .logo-text {
-    font-size: 20px;
-    font-weight: bold;
-    margin-top: 12px;
-    color: #333;
-  }
-
-  .new-chat-button {
-    width: 100%;
-    margin-top: 25px;
-    background: linear-gradient(to right, #4facfe, #00f2fe);
-    color: white;
-    border: none;
-    transition: transform 0.2s ease;
-  }
-
-  .new-chat-button:hover {
-    transform: scale(1.03);
-  }
-
-  .compress-memory-button {
-    width: 100%;
-    margin-top: 12px;
+    align-items: flex-start;
+    gap: 8px;
   }
 }
 </style>

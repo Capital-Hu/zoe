@@ -141,6 +141,10 @@ sqlite3 data/zoe.db 'select id,doctor_name,department,schedule_date,time_of_day,
   - 入参：`{ "userId": 1, "memoryId": "123", "message": "你好" }`
 - `POST /zoe/memory/compress`
   - 入参：`{ "userId": 1, "memoryId": "123" }`
+- `GET /zoe/sessions?userId=1`
+  - 返回该用户下的历史会话列表（memoryId、标题、轮次、更新时间）
+- `GET /zoe/sessions/{memoryId}?userId=1`
+  - 返回指定会话的历史消息，可用于前端点击历史会话后回放
 - `GET /appointments`
 - `POST /appointments`
 - `PUT /appointments/{id}`

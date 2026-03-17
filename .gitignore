@@ -51,4 +51,4 @@ zoe-ui/package-lock.json
 
 *.db
 
-py-backend/data
+py-backend/data/
