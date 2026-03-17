@@ -36,6 +36,25 @@ conda run -n zoe pip install -r requirements.txt
 - 使用 Ollama：
   - `MODEL_PROVIDER=ollama`
   - 配置 `OLLAMA_BASE_URL`、`OLLAMA_CHAT_MODEL`、`OLLAMA_EMBED_MODEL`
+- 记忆存储（MongoDB）：
+  - `MONGO_URI=mongodb://localhost:27017`
+  - `MONGO_DB=zoe`
+  - `MONGO_MEMORY_COLLECTION=layered_memory`
+  - `MONGO_TIMEOUT_MS=3000`
+
+### macOS 启动 MongoDB（Homebrew）
+
+```bash
+brew services start mongodb-community
+brew services list | grep mongo
+```
+
+如果你还没安装 MongoDB Community：
+
+```bash
+brew tap mongodb/brew
+brew install mongodb-community
+```
 
 ## 启动
 
@@ -48,6 +67,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 ## 知识库预处理（Embedding + BM25）
 
 在首次启动前建议先做预处理，提前生成向量索引和 BM25 缓存，减少服务冷启动耗时。
+
+`scripts/preprocess_knowledge.py` 当前为全量重建模式：若 `py-backend/data/vector_store/` 已存在，会先删除旧产物再重新生成。
 
 ```bash
 cd py-backend
@@ -144,15 +165,10 @@ Agent 可调用以下工具（由后端执行）：
 
 ## 记忆与会话持久化说明
 
-当前实现默认使用本地持久化（无需 MongoDB）：
+当前实现采用“业务数据 SQLite + 记忆 MongoDB + 日志 JSONL”混合持久化：
 
 - 业务数据库：`py-backend/data/zoe.db`（SQLite）
-- 分层记忆：`py-backend/data/memory/*.json`
+- 分层记忆：MongoDB 集合（默认 `zoe.layered_memory`）
 - 会话日志：`py-backend/data/logs/conversation_*.jsonl`
 
 会话隔离策略：后端会把 `userId + memoryId` 组合成作用域 ID（例如 `user_1_mem_123`），不同账号的会话与日志天然隔离。
-
-是否需要 MongoDB：
-
-- 当前阶段不需要，SQLite + 本地文件已经可用且更轻量。
-- 如果后续要多实例部署、共享记忆、或更复杂检索统计，再迁移 MongoDB 更合适。

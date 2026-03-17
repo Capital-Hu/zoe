@@ -5,7 +5,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parents[1] / ".env"),
+        env_file_encoding="utf-8",
+    )
 
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8080, alias="PORT")
@@ -25,6 +28,10 @@ class Settings(BaseSettings):
     min_score: float = Field(default=0.2, alias="MIN_SCORE")
     working_memory_window: int = Field(default=6, alias="WORKING_MEMORY_WINDOW")
     auto_compress_trigger_chars: int = Field(default=2200, alias="AUTO_COMPRESS_TRIGGER_CHARS")
+    mongo_uri: str = Field(default="mongodb://localhost:27017", alias="MONGO_URI")
+    mongo_db: str = Field(default="zoe", alias="MONGO_DB")
+    mongo_memory_collection: str = Field(default="layered_memory", alias="MONGO_MEMORY_COLLECTION")
+    mongo_timeout_ms: int = Field(default=3000, alias="MONGO_TIMEOUT_MS")
 
     @property
     def root_dir(self) -> Path:
@@ -41,10 +48,6 @@ class Settings(BaseSettings):
     @property
     def vector_dir(self) -> Path:
         return self.data_dir / "vector_store"
-
-    @property
-    def memory_dir(self) -> Path:
-        return self.data_dir / "memory"
 
     @property
     def prompts_dir(self) -> Path:

@@ -2,7 +2,7 @@
   <div class="app-layout">
     <div class="sidebar">
       <div class="logo-section">
-        <img src="@/assets/zoe.jpg" alt="Zoe大模型" width="160" height="160" />
+        <img src="@/assets/vue.svg" alt="Zoe大模型" width="160" height="160" />
         <span class="logo-text">Zoe大模型（医疗版）</span>
       </div>
       <div v-if="currentUser" class="user-info">

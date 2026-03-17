@@ -106,7 +106,7 @@ npm run dev
 
 ### 5.2 记忆与日志
 
-- 分层记忆：py-backend/data/memory/*.json
+- 分层记忆：MongoDB（默认库表：zoe.layered_memory）
 - 会话日志：py-backend/data/logs/conversation_*.jsonl
 
 每轮聊天日志至少包含：question、answer、memory_context、retrieved_context、tool_trace。
@@ -163,4 +163,4 @@ npm run dev
 - 引入 Token/JWT 鉴权替代仅 userId 校验
 - 增加历史会话列表接口
 - 增量知识库预处理（仅更新变更文档）
-- 需要多实例共享时再迁移 MongoDB
+- 评估会话日志是否也迁移到 MongoDB（当前仍为本地 JSONL）

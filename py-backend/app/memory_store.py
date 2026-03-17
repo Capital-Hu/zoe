@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from pathlib import Path
+from importlib import import_module
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 
@@ -13,13 +14,20 @@ from app.prompt_loader import render_prompt
 class LayeredMemoryStore:
     def __init__(self, llm):
         self.llm = llm
-        settings.memory_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            mongo_module = import_module("pymongo")
+            mongo_client_cls = getattr(mongo_module, "MongoClient")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("pymongo is required, please run: pip install -r requirements.txt") from exc
+
+        self._client = mongo_client_cls(settings.mongo_uri, serverSelectionTimeoutMS=settings.mongo_timeout_ms)
+        self._collection: Any = self._client[settings.mongo_db][settings.mongo_memory_collection]
+        # 启动时尽早校验连接，避免运行中才发现不可用
+        self._client.admin.command("ping")
+        self._collection.create_index("memory_id", unique=True)
 
     def _safe_memory_id(self, memory_id: str) -> str:
         return "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(memory_id))
-
-    def _file(self, memory_id: str) -> Path:
-        return settings.memory_dir / f"{self._safe_memory_id(memory_id)}.json"
 
     def _default(self) -> dict:
         return {
@@ -29,16 +37,32 @@ class LayeredMemoryStore:
             "last_compressed_at": None,
         }
 
+    def _normalize_doc(self, doc: dict | None) -> dict:
+        base = self._default()
+        if not doc:
+            return base
+        base["working_memory"] = list(doc.get("working_memory", []))
+        base["short_term_summary"] = str(doc.get("short_term_summary", "") or "")
+        base["long_term_facts"] = list(doc.get("long_term_facts", []))
+        base["last_compressed_at"] = doc.get("last_compressed_at")
+        return base
+
     def load(self, memory_id: str) -> dict:
-        path = self._file(memory_id)
-        if not path.exists():
-            return self._default()
-        return json.loads(path.read_text(encoding="utf-8"))
+        safe_id = self._safe_memory_id(memory_id)
+        doc = self._collection.find_one({"memory_id": safe_id}, {"_id": 0})
+        if doc:
+            return self._normalize_doc(doc)
+        return self._default()
 
     def save(self, memory_id: str, data: dict) -> None:
-        self._file(memory_id).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        safe_id = self._safe_memory_id(memory_id)
+        payload = self._normalize_doc(data)
+        payload["memory_id"] = safe_id
+        payload["updated_at"] = datetime.utcnow().isoformat()
+        self._collection.update_one(
+            {"memory_id": safe_id},
+            {"$set": payload, "$setOnInsert": {"created_at": datetime.utcnow().isoformat()}},
+            upsert=True,
         )
 
     def add_turn(self, memory_id: str, user_msg: str, ai_msg: str) -> None:

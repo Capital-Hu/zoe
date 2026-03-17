@@ -46,3 +46,7 @@ build/
 *.faiss
 
 *.json
+
+zoe-ui/package-lock.json
+
+*.db
