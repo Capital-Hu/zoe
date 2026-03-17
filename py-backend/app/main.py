@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import logging
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
+from app.db import Appointment, DoctorSchedule, SessionLocal, init_db
+from app.graph_flow import ZoeGraph
+from app.memory_store import LayeredMemoryStore
+from app.models import ModelBundle
+from app.retriever import HybridRetriever
+from app.schemas import (
+    AppointmentCreate,
+    AppointmentUpdate,
+    ChatForm,
+    CompressMemoryForm,
+    ScheduleAdjustSlots,
+    ScheduleCreate,
+    ScheduleStop,
+)
+
+app = FastAPI(title="Zoe Medical Agent (Python)")
+logger = logging.getLogger(__name__)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+zoe_graph: ZoeGraph | None = None
+
+
+@app.on_event("startup")
+def on_startup():
+    global zoe_graph
+    init_db()
+    try:
+        bundle = ModelBundle()
+        retriever = HybridRetriever(bundle.embedding)
+        memory_store = LayeredMemoryStore(bundle.llm)
+        zoe_graph = ZoeGraph(bundle.llm, retriever, memory_store)
+    except Exception as exc:
+        # 允许非聊天接口（如排班管理）在模型配置缺失时正常工作
+        zoe_graph = None
+        logger.warning("Chat agent init skipped: %s", exc)
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+@app.post("/zoe/chat")
+def chat(payload: ChatForm):
+    if zoe_graph is None:
+        raise HTTPException(status_code=503, detail="chat agent not initialized; please check model config")
+    answer = zoe_graph.run(memory_id=payload.memoryId, question=payload.message)
+
+    def text_stream():
+        # 兼容前端流式追加逻辑，按小块返回
+        for i in range(0, len(answer), 8):
+            yield answer[i : i + 8]
+
+    return StreamingResponse(text_stream(), media_type="text/stream;charset=utf-8")
+
+
+@app.post("/zoe/memory/compress")
+def compress_memory(payload: CompressMemoryForm):
+    if zoe_graph is None:
+        raise HTTPException(status_code=503, detail="chat memory service not initialized; please check model config")
+    data = zoe_graph.memory_store.compress(payload.memoryId)
+    return {
+        "memoryId": payload.memoryId,
+        "short_term_summary": data.get("short_term_summary", ""),
+        "long_term_facts_count": len(data.get("long_term_facts", [])),
+        "last_compressed_at": data.get("last_compressed_at"),
+    }
+
+
+@app.get("/appointments")
+def list_appointments():
+    with SessionLocal() as session:
+        rows = session.query(Appointment).order_by(Appointment.id.desc()).all()
+        return [
+            {
+                "id": r.id,
+                "user_id": r.user_id,
+                "patient_name": r.patient_name,
+                "id_card": r.id_card,
+                "department": r.department,
+                "doctor_name": r.doctor_name,
+                "appointment_date": r.appointment_date,
+                "time_of_day": r.time_of_day,
+                "appointment_time": r.appointment_time,
+                "status": r.status,
+                "note": r.note,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
+
+
+@app.post("/appointments")
+def create_appointment(payload: AppointmentCreate):
+    with SessionLocal() as session:
+        row = Appointment(
+            user_id=payload.user_id,
+            patient_name=payload.patient_name,
+            id_card=payload.id_card,
+            department=payload.department,
+            doctor_name=payload.doctor_name,
+            appointment_date=payload.appointment_date,
+            time_of_day=payload.time_of_day,
+            appointment_time=payload.appointment_time,
+            status=payload.status,
+            note=payload.note,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return {"id": row.id}
+
+
+@app.put("/appointments/{appointment_id}")
+def update_appointment(appointment_id: int, payload: AppointmentUpdate):
+    with SessionLocal() as session:
+        row = session.query(Appointment).filter(Appointment.id == appointment_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="appointment not found")
+        for field in (
+            "patient_name",
+            "id_card",
+            "department",
+            "doctor_name",
+            "appointment_date",
+            "time_of_day",
+            "appointment_time",
+            "status",
+            "note",
+        ):
+            value = getattr(payload, field)
+            if value is not None:
+                setattr(row, field, value)
+        session.commit()
+        return {"ok": True}
+
+
+@app.delete("/appointments/{appointment_id}")
+def delete_appointment(appointment_id: int):
+    with SessionLocal() as session:
+        row = session.query(Appointment).filter(Appointment.id == appointment_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="appointment not found")
+        session.delete(row)
+        session.commit()
+        return {"ok": True}
+
+
+@app.get("/schedules")
+def list_schedules(department: str | None = None, schedule_date: str | None = None):
+    with SessionLocal() as session:
+        query = session.query(DoctorSchedule)
+        if department:
+            query = query.filter(DoctorSchedule.department == department)
+        if schedule_date:
+            query = query.filter(DoctorSchedule.schedule_date == schedule_date)
+        rows = query.order_by(DoctorSchedule.schedule_date.desc(), DoctorSchedule.id.desc()).all()
+        return [
+            {
+                "id": r.id,
+                "doctor_name": r.doctor_name,
+                "department": r.department,
+                "schedule_date": r.schedule_date,
+                "time_of_day": r.time_of_day,
+                "total_slots": r.total_slots,
+                "available_slots": r.available_slots,
+                "status": r.status,
+                "stop_reason": r.stop_reason,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
+
+
+@app.post("/schedules")
+def create_schedule(payload: ScheduleCreate):
+    if payload.available_slots > payload.total_slots:
+        raise HTTPException(status_code=400, detail="available_slots cannot exceed total_slots")
+    with SessionLocal() as session:
+        existed = (
+            session.query(DoctorSchedule)
+            .filter(DoctorSchedule.doctor_name == payload.doctor_name)
+            .filter(DoctorSchedule.schedule_date == payload.schedule_date)
+            .filter(DoctorSchedule.time_of_day == payload.time_of_day)
+            .first()
+        )
+        if existed:
+            raise HTTPException(status_code=409, detail="schedule already exists")
+        row = DoctorSchedule(
+            doctor_name=payload.doctor_name,
+            department=payload.department,
+            schedule_date=payload.schedule_date,
+            time_of_day=payload.time_of_day,
+            total_slots=payload.total_slots,
+            available_slots=payload.available_slots,
+            status="ACTIVE",
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return {"id": row.id}
+
+
+@app.put("/schedules/{schedule_id}/stop")
+def stop_schedule(schedule_id: int, payload: ScheduleStop):
+    with SessionLocal() as session:
+        row = session.query(DoctorSchedule).filter(DoctorSchedule.id == schedule_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="schedule not found")
+        row.status = "STOPPED"
+        row.stop_reason = payload.reason
+        row.available_slots = 0
+        session.commit()
+        return {"ok": True}
+
+
+@app.put("/schedules/{schedule_id}/slots")
+def adjust_schedule_slots(schedule_id: int, payload: ScheduleAdjustSlots):
+    if payload.total_slots < 0 or payload.available_slots < 0:
+        raise HTTPException(status_code=400, detail="slots must be non-negative")
+    if payload.available_slots > payload.total_slots:
+        raise HTTPException(status_code=400, detail="available_slots cannot exceed total_slots")
+    with SessionLocal() as session:
+        row = session.query(DoctorSchedule).filter(DoctorSchedule.id == schedule_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="schedule not found")
+        row.total_slots = payload.total_slots
+        row.available_slots = payload.available_slots
+        if row.status == "STOPPED" and payload.available_slots > 0:
+            row.status = "ACTIVE"
+            row.stop_reason = None
+        session.commit()
+        return {"ok": True}

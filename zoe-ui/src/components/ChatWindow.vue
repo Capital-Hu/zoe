@@ -9,6 +9,14 @@
         <i class="fa-solid fa-plus"></i>
         &nbsp;新会话
       </el-button>
+      <el-button
+        class="compress-memory-button"
+        @click="compressMemory"
+        :loading="isCompressing"
+      >
+        <i class="fa-solid fa-box-archive"></i>
+        &nbsp;压缩记忆
+      </el-button>
     </div>
     <div class="main-content">
       <div class="chat-container">
@@ -64,6 +72,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 const messaggListRef = ref();
 const isSending = ref(false);
+const isCompressing = ref(false);
 const uuid = ref();
 const inputMessage = ref('');
 const messages = ref([]);
@@ -163,6 +172,35 @@ const newChat = () => {
   localStorage.removeItem('user_uuid');
   window.location.reload();
 };
+
+const compressMemory = () => {
+  isCompressing.value = true;
+  axios
+    .post('/api/zoe/memory/compress', { memoryId: uuid.value })
+    .then((res) => {
+      const data = res.data || {};
+      messages.value.push({
+        isUser: false,
+        content: `记忆压缩完成：长期记忆条数 ${data.long_term_facts_count ?? 0}`,
+        isTyping: false,
+        isThinking: false,
+      });
+      scrollToBottom();
+    })
+    .catch((error) => {
+      console.error('压缩记忆失败:', error);
+      messages.value.push({
+        isUser: false,
+        content: '记忆压缩失败，请稍后重试',
+        isTyping: false,
+        isThinking: false,
+      });
+      scrollToBottom();
+    })
+    .finally(() => {
+      isCompressing.value = false;
+    });
+};
 </script>
 
 <style scoped>
@@ -205,6 +243,14 @@ const newChat = () => {
 
 .new-chat-button:hover {
   transform: scale(1.03);
+}
+
+.compress-memory-button {
+  width: 100%;
+  margin-top: 12px;
+  background: linear-gradient(to right, #36d1dc, #5b86e5);
+  color: white;
+  border: none;
 }
 
 .main-content {
@@ -364,6 +410,12 @@ const newChat = () => {
     width: auto;
     margin-top: 5px;
   }
+
+  .compress-memory-button {
+    width: auto;
+    margin-top: 5px;
+    margin-right: 20px;
+  }
 }
 
 @media (min-width: 769px) {
@@ -410,6 +462,11 @@ const newChat = () => {
 
   .new-chat-button:hover {
     transform: scale(1.03);
+  }
+
+  .compress-memory-button {
+    width: 100%;
+    margin-top: 12px;
   }
 }
 </style>
