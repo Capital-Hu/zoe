@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     mongo_uri: str = Field(default="mongodb://localhost:27017", alias="MONGO_URI")
     mongo_db: str = Field(default="zoe", alias="MONGO_DB")
     mongo_memory_collection: str = Field(default="layered_memory", alias="MONGO_MEMORY_COLLECTION")
+    mongo_conversation_collection: str = Field(default="conversation_sessions", alias="MONGO_CONVERSATION_COLLECTION")
     mongo_timeout_ms: int = Field(default=3000, alias="MONGO_TIMEOUT_MS")
 
     @property

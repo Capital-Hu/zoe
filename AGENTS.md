@@ -10,7 +10,7 @@
 - 前端：Vue 3 + Element Plus
 - 检索：本地混合检索（FAISS 向量 + BM25）
 - 记忆：分层记忆（工作记忆、短期摘要、长期记忆）
-- 会话日志：本地 JSONL 落盘
+- 会话信息：MongoDB 持久化 + 本地 JSONL 日志双写
 - 业务数据库：SQLite
 
 ## 2. 关键目录
@@ -107,7 +107,12 @@ npm run dev
 ### 5.2 记忆与日志
 
 - 分层记忆：MongoDB（默认库表：zoe.layered_memory）
-- 会话日志：py-backend/data/logs/conversation_*.jsonl
+- 会话信息：MongoDB（默认库表：zoe.conversation_sessions）
+- 会话日志：py-backend/data/logs/conversation_*.jsonl（保留，便于排障和人工查看）
+
+会话查询约定：
+
+- 历史会话列表/详情接口统一查询 MongoDB 会话表，不再以本地 JSONL 作为主查询源。
 
 每轮聊天日志至少包含：question、answer、memory_context、retrieved_context、tool_trace。
 
@@ -163,4 +168,4 @@ npm run dev
 - 引入 Token/JWT 鉴权替代仅 userId 校验
 - 增加历史会话列表接口
 - 增量知识库预处理（仅更新变更文档）
-- 评估会话日志是否也迁移到 MongoDB（当前仍为本地 JSONL）
+- 优化会话归档策略（例如 Mongo 历史分层归档 + JSONL 定期清理）

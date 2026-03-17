@@ -40,6 +40,7 @@ conda run -n zoe pip install -r requirements.txt
   - `MONGO_URI=mongodb://localhost:27017`
   - `MONGO_DB=zoe`
   - `MONGO_MEMORY_COLLECTION=layered_memory`
+  - `MONGO_CONVERSATION_COLLECTION=conversation_sessions`
   - `MONGO_TIMEOUT_MS=3000`
 
 ### macOS 启动 MongoDB（Homebrew）
@@ -100,6 +101,14 @@ PYTHONPATH=. python scripts/preprocess_knowledge.py
 - `retrieved_context`
 - `tool_trace`（工具名、入参、结果）
 
+如果你已存在历史 JSONL 会话数据，且希望 `/zoe/sessions` 接口可查询到旧数据，可执行一次回填：
+
+```bash
+cd py-backend
+conda activate zoe
+PYTHONPATH=. python scripts/backfill_conversations_to_mongo.py
+```
+
 ## 数据库与 Mock 数据
 
 SQLite 数据库文件：`py-backend/data/zoe.db`
@@ -142,9 +151,9 @@ sqlite3 data/zoe.db 'select id,doctor_name,department,schedule_date,time_of_day,
 - `POST /zoe/memory/compress`
   - 入参：`{ "userId": 1, "memoryId": "123" }`
 - `GET /zoe/sessions?userId=1`
-  - 返回该用户下的历史会话列表（memoryId、标题、轮次、更新时间）
+  - 返回该用户下的历史会话列表（从 MongoDB 会话集合读取）
 - `GET /zoe/sessions/{memoryId}?userId=1`
-  - 返回指定会话的历史消息，可用于前端点击历史会话后回放
+  - 返回指定会话的历史消息（从 MongoDB 会话集合读取）
 - `GET /appointments`
 - `POST /appointments`
 - `PUT /appointments/{id}`
@@ -173,6 +182,7 @@ Agent 可调用以下工具（由后端执行）：
 
 - 业务数据库：`py-backend/data/zoe.db`（SQLite）
 - 分层记忆：MongoDB 集合（默认 `zoe.layered_memory`）
-- 会话日志：`py-backend/data/logs/conversation_*.jsonl`
+- 会话信息：MongoDB 集合（默认 `zoe.conversation_sessions`）
+- 会话日志：`py-backend/data/logs/conversation_*.jsonl`（保留，便于排障和人工查看）
 
 会话隔离策略：后端会把 `userId + memoryId` 组合成作用域 ID（例如 `user_1_mem_123`），不同账号的会话与日志天然隔离。

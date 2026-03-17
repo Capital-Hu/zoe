@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from app.auth_utils import hash_password, verify_password
+from app.conversation_logger import ConversationLogger
 from app.db import Account, Appointment, DoctorSchedule, SessionLocal, init_db
 from app.graph_flow import ZoeGraph
 from app.memory_store import LayeredMemoryStore
@@ -37,6 +36,7 @@ app.add_middleware(
 )
 
 zoe_graph: ZoeGraph | None = None
+conversation_logger = ConversationLogger()
 
 
 @app.on_event("startup")
@@ -124,33 +124,6 @@ def compress_memory(payload: CompressMemoryForm):
     }
 
 
-def _safe_memory_id(memory_id: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(memory_id))
-
-
-def _extract_memory_suffix(scoped_memory_id: str, user_id: int) -> str:
-    prefix = f"user_{user_id}_mem_"
-    if scoped_memory_id.startswith(prefix):
-        return scoped_memory_id[len(prefix) :]
-    return scoped_memory_id
-
-
-def _read_jsonl_records(file_path: Path) -> list[dict]:
-    records: list[dict] = []
-    if not file_path.exists():
-        return records
-    with file_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return records
-
-
 @app.get("/zoe/sessions")
 def list_sessions(userId: int):
     with SessionLocal() as session:
@@ -158,27 +131,7 @@ def list_sessions(userId: int):
         if not account:
             raise HTTPException(status_code=401, detail="invalid userId")
 
-    logs_dir = Path(__file__).resolve().parents[1] / "data" / "logs"
-    pattern = f"conversation_user_{userId}_mem_*.jsonl"
-    items = []
-    for log_file in logs_dir.glob(pattern):
-        records = _read_jsonl_records(log_file)
-        if not records:
-            continue
-        first_record = records[0]
-        last_record = records[-1]
-        scoped_memory_id = str(last_record.get("memory_id") or "")
-        items.append(
-            {
-                "memoryId": _extract_memory_suffix(scoped_memory_id, userId),
-                "scopedMemoryId": scoped_memory_id,
-                "title": str(first_record.get("question") or "新会话")[:40],
-                "turns": len(records),
-                "updatedAt": last_record.get("timestamp"),
-            }
-        )
-
-    items.sort(key=lambda x: x.get("updatedAt") or "", reverse=True)
+    items = conversation_logger.list_sessions(user_id=userId)
     return {"sessions": items}
 
 
@@ -189,29 +142,10 @@ def get_session_detail(memory_id: str, userId: int):
         if not account:
             raise HTTPException(status_code=401, detail="invalid userId")
 
-    scoped_memory_id = f"user_{userId}_mem_{memory_id}"
-    safe_scoped_memory_id = _safe_memory_id(scoped_memory_id)
-    log_file = Path(__file__).resolve().parents[1] / "data" / "logs" / f"conversation_{safe_scoped_memory_id}.jsonl"
-    records = _read_jsonl_records(log_file)
-    if not records:
+    data = conversation_logger.get_session_detail(user_id=userId, memory_id=memory_id)
+    if not data:
         raise HTTPException(status_code=404, detail="session not found")
-
-    messages = []
-    for record in records:
-        question = record.get("question")
-        answer = record.get("answer")
-        if question:
-            messages.append({"isUser": True, "content": str(question)})
-        if answer:
-            messages.append({"isUser": False, "content": str(answer)})
-
-    return {
-        "memoryId": memory_id,
-        "scopedMemoryId": scoped_memory_id,
-        "messages": messages,
-        "turns": len(records),
-        "updatedAt": records[-1].get("timestamp"),
-    }
+    return data
 
 
 @app.get("/appointments")
