@@ -50,5 +50,9 @@ class Settings(BaseSettings):
     def prompts_dir(self) -> Path:
         return self.root_dir / "py-backend" / "prompts"
 
+    @property
+    def logs_dir(self) -> Path:
+        return self.root_dir / "py-backend" / "data" / "logs"
+
 
 settings = Settings()

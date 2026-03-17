@@ -6,7 +6,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.db import Appointment, DoctorSchedule, SessionLocal, init_db
+from app.auth_utils import hash_password, verify_password
+from app.db import Account, Appointment, DoctorSchedule, SessionLocal, init_db
 from app.graph_flow import ZoeGraph
 from app.memory_store import LayeredMemoryStore
 from app.models import ModelBundle
@@ -16,6 +17,8 @@ from app.schemas import (
     AppointmentUpdate,
     ChatForm,
     CompressMemoryForm,
+    LoginForm,
+    RegisterForm,
     ScheduleAdjustSlots,
     ScheduleCreate,
     ScheduleStop,
@@ -54,11 +57,44 @@ def health():
     return {"ok": True}
 
 
+@app.post("/auth/register")
+def register(payload: RegisterForm):
+    username = payload.username.strip()
+    if len(username) < 3 or len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="username or password too short")
+
+    with SessionLocal() as session:
+        existed = session.query(Account).filter(Account.username == username).first()
+        if existed:
+            raise HTTPException(status_code=409, detail="username already exists")
+
+        row = Account(username=username, password_hash=hash_password(payload.password))
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return {"userId": row.id, "username": row.username}
+
+
+@app.post("/auth/login")
+def login(payload: LoginForm):
+    username = payload.username.strip()
+    with SessionLocal() as session:
+        row = session.query(Account).filter(Account.username == username).first()
+        if not row or not verify_password(payload.password, row.password_hash):
+            raise HTTPException(status_code=401, detail="invalid username or password")
+        return {"userId": row.id, "username": row.username}
+
+
 @app.post("/zoe/chat")
 def chat(payload: ChatForm):
     if zoe_graph is None:
         raise HTTPException(status_code=503, detail="chat agent not initialized; please check model config")
-    answer = zoe_graph.run(memory_id=payload.memoryId, question=payload.message)
+    with SessionLocal() as session:
+        account = session.query(Account).filter(Account.id == payload.userId).first()
+        if not account:
+            raise HTTPException(status_code=401, detail="invalid userId")
+    scoped_memory_id = f"user_{payload.userId}_mem_{payload.memoryId}"
+    answer = zoe_graph.run(memory_id=scoped_memory_id, question=payload.message)
 
     def text_stream():
         # 兼容前端流式追加逻辑，按小块返回
@@ -72,9 +108,14 @@ def chat(payload: ChatForm):
 def compress_memory(payload: CompressMemoryForm):
     if zoe_graph is None:
         raise HTTPException(status_code=503, detail="chat memory service not initialized; please check model config")
-    data = zoe_graph.memory_store.compress(payload.memoryId)
+    with SessionLocal() as session:
+        account = session.query(Account).filter(Account.id == payload.userId).first()
+        if not account:
+            raise HTTPException(status_code=401, detail="invalid userId")
+    scoped_memory_id = f"user_{payload.userId}_mem_{payload.memoryId}"
+    data = zoe_graph.memory_store.compress(scoped_memory_id)
     return {
-        "memoryId": payload.memoryId,
+        "memoryId": scoped_memory_id,
         "short_term_summary": data.get("short_term_summary", ""),
         "long_term_facts_count": len(data.get("long_term_facts", [])),
         "last_compressed_at": data.get("last_compressed_at"),

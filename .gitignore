@@ -38,3 +38,11 @@ build/
 .DS_Store
 
 *.pyc
+
+*.env
+
+*.pkl
+
+*.faiss
+
+*.json

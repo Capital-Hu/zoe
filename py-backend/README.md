@@ -3,10 +3,8 @@
 这个目录是新的后端实现，替代原有 Java LangChain4j 对话后端。
 
 ## 功能
-
-- LangChain + LangGraph 对话工作流
-- 本地知识库检索：读取项目根目录 `knowledge/`
-- 混合检索：FAISS 向量检索 + BM25 检索（RRF 融合）
+  - 入参：`{ "userId": 1, "memoryId": "123", "message": "你好" }`
+  - 入参：`{ "userId": 1, "memoryId": "123" }`
 - 分层记忆：工作记忆 + 短期摘要 + 长期事实
 - 提示词外置：统一放在 `py-backend/prompts/`
 - Agent Function Calling：分导诊、查号源、预约、取消预约、记录查询
@@ -47,6 +45,40 @@ conda activate zoe
 uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
+## 知识库预处理（Embedding + BM25）
+
+在首次启动前建议先做预处理，提前生成向量索引和 BM25 缓存，减少服务冷启动耗时。
+
+```bash
+cd py-backend
+conda activate zoe
+PYTHONPATH=. python scripts/preprocess_knowledge.py
+```
+
+产物文件位于 `py-backend/data/vector_store/`：
+
+- `index.faiss`（向量索引）
+- `index.pkl`（FAISS 元信息）
+- `bm25_meta.json`（BM25 文档片段）
+- `bm25.pkl`（BM25 缓存模型）
+
+## 会话日志
+
+每轮 `/zoe/chat` 会自动保存上下文日志（JSONL）：
+
+- 目录：`py-backend/data/logs/`
+- 文件：`conversation_{memoryId}.jsonl`
+
+单条日志包含：
+
+- `timestamp`
+- `memory_id`
+- `question`
+- `answer`
+- `memory_context`
+- `retrieved_context`
+- `tool_trace`（工具名、入参、结果）
+
 ## 数据库与 Mock 数据
 
 SQLite 数据库文件：`py-backend/data/zoe.db`
@@ -79,10 +111,15 @@ sqlite3 data/zoe.db 'select id,doctor_name,department,schedule_date,time_of_day,
 
 ## 接口
 
+认证接口（简单注册登录）：
+
+- `POST /auth/register` 入参：`{ "username": "alice", "password": "123456" }`
+- `POST /auth/login` 入参：`{ "username": "alice", "password": "123456" }`
+
 - `POST /zoe/chat`（流式文本）
-  - 入参：`{ "memoryId": 123, "message": "你好" }`
+  - 入参：`{ "userId": 1, "memoryId": "123", "message": "你好" }`
 - `POST /zoe/memory/compress`
-  - 入参：`{ "memoryId": 123 }`
+  - 入参：`{ "userId": 1, "memoryId": "123" }`
 - `GET /appointments`
 - `POST /appointments`
 - `PUT /appointments/{id}`
@@ -104,3 +141,18 @@ Agent 可调用以下工具（由后端执行）：
 - `book_appointment(patient_name, id_card, department, appointment_date, time_of_day, doctor)`
 - `cancel_appointment(patient_name, id_card, department, appointment_date, time_of_day, doctor)`
 - `query_appointment_records(patient_name, id_card)`
+
+## 记忆与会话持久化说明
+
+当前实现默认使用本地持久化（无需 MongoDB）：
+
+- 业务数据库：`py-backend/data/zoe.db`（SQLite）
+- 分层记忆：`py-backend/data/memory/*.json`
+- 会话日志：`py-backend/data/logs/conversation_*.jsonl`
+
+会话隔离策略：后端会把 `userId + memoryId` 组合成作用域 ID（例如 `user_1_mem_123`），不同账号的会话与日志天然隔离。
+
+是否需要 MongoDB：
+
+- 当前阶段不需要，SQLite + 本地文件已经可用且更轻量。
+- 如果后续要多实例部署、共享记忆、或更复杂检索统计，再迁移 MongoDB 更合适。

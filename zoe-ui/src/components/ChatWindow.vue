@@ -5,6 +5,9 @@
         <img src="@/assets/zoe.jpg" alt="Zoe大模型" width="160" height="160" />
         <span class="logo-text">Zoe大模型（医疗版）</span>
       </div>
+      <div v-if="currentUser" class="user-info">
+        当前用户：{{ currentUser.username }}
+      </div>
       <el-button class="new-chat-button" @click="newChat">
         <i class="fa-solid fa-plus"></i>
         &nbsp;新会话
@@ -17,9 +20,34 @@
         <i class="fa-solid fa-box-archive"></i>
         &nbsp;压缩记忆
       </el-button>
+      <el-button v-if="currentUser" class="logout-button" @click="logout">
+        <i class="fa-solid fa-right-from-bracket"></i>
+        &nbsp;退出登录
+      </el-button>
     </div>
     <div class="main-content">
+      <div v-if="!currentUser" class="auth-wrapper">
+        <el-card class="auth-card">
+          <h3>{{ authMode === 'login' ? '登录' : '注册' }}</h3>
+          <el-input v-model="authForm.username" placeholder="用户名" class="auth-input" />
+          <el-input v-model="authForm.password" placeholder="密码（至少6位）" show-password class="auth-input" />
+          <el-input
+            v-if="authMode === 'register'"
+            v-model="authForm.confirmPassword"
+            placeholder="确认密码"
+            show-password
+            class="auth-input"
+          />
+          <el-button type="primary" class="auth-btn" @click="submitAuth" :loading="isAuthSubmitting">
+            {{ authMode === 'login' ? '登录' : '注册' }}
+          </el-button>
+          <el-button text class="auth-switch" @click="switchAuthMode">
+            {{ authMode === 'login' ? '没有账号？去注册' : '已有账号？去登录' }}
+          </el-button>
+        </el-card>
+      </div>
       <div class="chat-container">
+        <template v-if="currentUser">
         <div class="message-list" ref="messaggListRef">
           <div
               v-for="(message, index) in messages"
@@ -60,6 +88,7 @@
             发送
           </el-button>
         </div>
+        </template>
       </div>
     </div>
   </div>
@@ -69,19 +98,31 @@
 import { onMounted, ref, watch } from 'vue';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
+import { ElMessage } from 'element-plus';
 
 const messaggListRef = ref();
 const isSending = ref(false);
 const isCompressing = ref(false);
+const isAuthSubmitting = ref(false);
 const uuid = ref();
 const inputMessage = ref('');
 const messages = ref([]);
+const currentUser = ref(null);
+const authMode = ref('login');
+const authForm = ref({
+  username: '',
+  password: '',
+  confirmPassword: '',
+});
 
 onMounted(() => {
-  initUUID();
+  loadAuthUser();
+  if (currentUser.value) {
+    initUUID();
+    hello();
+  }
   // 移除 setInterval，改用手动滚动
   watch(messages, () => scrollToBottom(), { deep: true });
-  hello();
 });
 
 const scrollToBottom = () => {
@@ -91,10 +132,15 @@ const scrollToBottom = () => {
 };
 
 const hello = () => {
+  if (!currentUser.value) return;
   sendRequest('你好');
 };
 
 const sendMessage = () => {
+  if (!currentUser.value) {
+    ElMessage.warning('请先登录');
+    return;
+  }
   if (inputMessage.value.trim()) {
     sendRequest(inputMessage.value.trim());
     inputMessage.value = '';
@@ -126,7 +172,7 @@ const sendRequest = (message) => {
   scrollToBottom();
 
   axios
-      .post('/api/zoe/chat', { memoryId: uuid.value, message }, {
+      .post('/api/zoe/chat', { userId: currentUser.value.userId, memoryId: String(uuid.value), message }, {
         responseType: 'stream',
         onDownloadProgress: (e) => {
           const fullText = e.event.target.responseText;
@@ -150,12 +196,16 @@ const sendRequest = (message) => {
 
 // 初始化 UUID
 const initUUID = () => {
-  let storedUUID = localStorage.getItem('user_uuid');
+  let storedUUID = localStorage.getItem(memoryKey());
   if (!storedUUID) {
     storedUUID = uuidToNumber(uuidv4());
-    localStorage.setItem('user_uuid', storedUUID);
+    localStorage.setItem(memoryKey(), storedUUID);
   }
   uuid.value = storedUUID;
+};
+
+const memoryKey = () => {
+  return currentUser.value ? `chat_memory_${currentUser.value.userId}` : 'user_uuid';
 };
 
 const uuidToNumber = (uuid) => {
@@ -169,14 +219,14 @@ const uuidToNumber = (uuid) => {
 
 const newChat = () => {
   console.log('开始新会话');
-  localStorage.removeItem('user_uuid');
+  localStorage.removeItem(memoryKey());
   window.location.reload();
 };
 
 const compressMemory = () => {
   isCompressing.value = true;
   axios
-    .post('/api/zoe/memory/compress', { memoryId: uuid.value })
+    .post('/api/zoe/memory/compress', { userId: currentUser.value.userId, memoryId: String(uuid.value) })
     .then((res) => {
       const data = res.data || {};
       messages.value.push({
@@ -200,6 +250,58 @@ const compressMemory = () => {
     .finally(() => {
       isCompressing.value = false;
     });
+};
+
+const loadAuthUser = () => {
+  const raw = localStorage.getItem('auth_user');
+  if (!raw) return;
+  try {
+    currentUser.value = JSON.parse(raw);
+  } catch {
+    localStorage.removeItem('auth_user');
+  }
+};
+
+const switchAuthMode = () => {
+  authMode.value = authMode.value === 'login' ? 'register' : 'login';
+};
+
+const submitAuth = async () => {
+  if (!authForm.value.username || !authForm.value.password) {
+    ElMessage.warning('请输入用户名和密码');
+    return;
+  }
+  if (authMode.value === 'register' && authForm.value.password !== authForm.value.confirmPassword) {
+    ElMessage.warning('两次输入密码不一致');
+    return;
+  }
+  isAuthSubmitting.value = true;
+  try {
+    const api = authMode.value === 'login' ? '/api/auth/login' : '/api/auth/register';
+    const res = await axios.post(api, {
+      username: authForm.value.username,
+      password: authForm.value.password,
+    });
+    currentUser.value = res.data;
+    localStorage.setItem('auth_user', JSON.stringify(res.data));
+    initUUID();
+    messages.value = [];
+    hello();
+    ElMessage.success(authMode.value === 'login' ? '登录成功' : '注册成功');
+  } catch (err) {
+    console.error(err);
+    ElMessage.error('认证失败，请检查用户名和密码');
+  } finally {
+    isAuthSubmitting.value = false;
+  }
+};
+
+const logout = () => {
+  localStorage.removeItem('auth_user');
+  if (currentUser.value) {
+    localStorage.removeItem(`chat_memory_${currentUser.value.userId}`);
+  }
+  window.location.reload();
 };
 </script>
 
@@ -232,6 +334,12 @@ const compressMemory = () => {
   color: #333;
 }
 
+.user-info {
+  margin-top: 10px;
+  font-size: 14px;
+  color: #4a4a4a;
+}
+
 .new-chat-button {
   width: 100%;
   margin-top: 50px;
@@ -251,6 +359,36 @@ const compressMemory = () => {
   background: linear-gradient(to right, #36d1dc, #5b86e5);
   color: white;
   border: none;
+}
+
+.logout-button {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.auth-wrapper {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.auth-card {
+  width: 360px;
+}
+
+.auth-input {
+  margin: 10px 0;
+}
+
+.auth-btn {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.auth-switch {
+  margin-top: 8px;
 }
 
 .main-content {

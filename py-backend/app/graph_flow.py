@@ -2,21 +2,23 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
 from app.agent_tools import get_agent_tools
+from app.conversation_logger import ConversationLogger
 from app.prompt_loader import render_prompt
 
 
 class ChatState(TypedDict, total=False):
-    memory_id: int
+    memory_id: str
     question: str
     is_first_session: bool
     memory_context: str
     retrieved_context: str
+    tool_trace: list[dict[str, Any]]
     answer: str
 
 
@@ -28,6 +30,7 @@ class ZoeGraph:
         self.tools = get_agent_tools()
         self.tool_map = {tool.name: tool for tool in self.tools}
         self.tool_enabled_llm = self._bind_tools(llm)
+        self.conversation_logger = ConversationLogger()
         self.graph = self._build_graph()
 
     def _bind_tools(self, llm):
@@ -87,6 +90,7 @@ class ZoeGraph:
         # 执行函数调用循环：模型决定调用工具 -> 执行工具 -> 把结果喂回模型
         max_rounds = 4
         answer = ""
+        tool_trace: list[dict[str, Any]] = []
         for _ in range(max_rounds):
             ai_msg = self.tool_enabled_llm.invoke(messages)
             messages.append(ai_msg)
@@ -114,19 +118,42 @@ class ZoeGraph:
                     except Exception as exc:
                         tool_result = f"工具 {tool_name} 执行失败：{exc}"
 
+                tool_trace.append(
+                    {
+                        "tool": tool_name,
+                        "args": args,
+                        "result": tool_result,
+                    }
+                )
+
                 messages.append(ToolMessage(content=tool_result, tool_call_id=call.get("id", "")))
 
         if not answer:
             final_msg = self.tool_enabled_llm.invoke(messages)
             answer = final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
 
-        return {"answer": answer}
+        return {"answer": answer, "tool_trace": tool_trace}
 
     def _save_memory(self, state: ChatState) -> ChatState:
         self.memory_store.add_turn(state["memory_id"], state["question"], state.get("answer", ""))
         self.memory_store.maybe_auto_compress(state["memory_id"])
+
+        # 每一轮会话都记录上下文日志，便于回放和排障
+        try:
+            self.conversation_logger.log_turn(
+                memory_id=state["memory_id"],
+                question=state.get("question", ""),
+                answer=state.get("answer", ""),
+                memory_context=state.get("memory_context", ""),
+                retrieved_context=state.get("retrieved_context", ""),
+                tool_trace=state.get("tool_trace", []),
+            )
+        except Exception:
+            # 日志失败不影响主流程
+            pass
+
         return {}
 
-    def run(self, memory_id: int, question: str) -> str:
+    def run(self, memory_id: str, question: str) -> str:
         result = self.graph.invoke({"memory_id": memory_id, "question": question})
         return result.get("answer", "")

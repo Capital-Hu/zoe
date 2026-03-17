@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 
 import jieba
@@ -18,6 +19,7 @@ class HybridRetriever:
         self.embedding_model = embedding_model
         settings.vector_dir.mkdir(parents=True, exist_ok=True)
         self.meta_path = settings.vector_dir / "bm25_meta.json"
+        self.bm25_path = settings.vector_dir / "bm25.pkl"
         self.vector_store = self._load_or_build_vector_store()
         self.bm25, self.bm25_docs = self._load_or_build_bm25()
 
@@ -57,6 +59,13 @@ class HybridRetriever:
         return vector_store
 
     def _load_or_build_bm25(self):
+        if self.meta_path.exists() and self.bm25_path.exists():
+            meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
+            docs = [Document(page_content=item["page_content"], metadata=item["metadata"]) for item in meta]
+            with self.bm25_path.open("rb") as f:
+                bm25 = pickle.load(f)
+            return bm25, docs
+
         if self.meta_path.exists():
             meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
             docs = [Document(page_content=item["page_content"], metadata=item["metadata"]) for item in meta]
@@ -69,7 +78,13 @@ class HybridRetriever:
             self.meta_path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
 
         tokenized_corpus = [list(jieba.cut(d.page_content)) for d in docs]
-        return BM25Okapi(tokenized_corpus), docs
+        bm25 = BM25Okapi(tokenized_corpus)
+        with self.bm25_path.open("wb") as f:
+            pickle.dump(bm25, f)
+        return bm25, docs
+
+    def corpus_size(self) -> int:
+        return len(self.bm25_docs)
 
     def _bm25_search(self, query: str, top_k: int) -> list[Document]:
         tokens = list(jieba.cut(query))

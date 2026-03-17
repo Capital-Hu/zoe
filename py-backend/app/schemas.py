@@ -2,12 +2,24 @@ from pydantic import BaseModel
 
 
 class ChatForm(BaseModel):
-    memoryId: int
+    userId: int
+    memoryId: str
     message: str
 
 
 class CompressMemoryForm(BaseModel):
-    memoryId: int
+    userId: int
+    memoryId: str
+
+
+class RegisterForm(BaseModel):
+    username: str
+    password: str
+
+
+class LoginForm(BaseModel):
+    username: str
+    password: str
 
 
 class AppointmentCreate(BaseModel):

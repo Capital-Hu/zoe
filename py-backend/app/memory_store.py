@@ -15,8 +15,11 @@ class LayeredMemoryStore:
         self.llm = llm
         settings.memory_dir.mkdir(parents=True, exist_ok=True)
 
-    def _file(self, memory_id: int) -> Path:
-        return settings.memory_dir / f"{memory_id}.json"
+    def _safe_memory_id(self, memory_id: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(memory_id))
+
+    def _file(self, memory_id: str) -> Path:
+        return settings.memory_dir / f"{self._safe_memory_id(memory_id)}.json"
 
     def _default(self) -> dict:
         return {
@@ -26,19 +29,19 @@ class LayeredMemoryStore:
             "last_compressed_at": None,
         }
 
-    def load(self, memory_id: int) -> dict:
+    def load(self, memory_id: str) -> dict:
         path = self._file(memory_id)
         if not path.exists():
             return self._default()
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def save(self, memory_id: int, data: dict) -> None:
+    def save(self, memory_id: str, data: dict) -> None:
         self._file(memory_id).write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-    def add_turn(self, memory_id: int, user_msg: str, ai_msg: str) -> None:
+    def add_turn(self, memory_id: str, user_msg: str, ai_msg: str) -> None:
         data = self.load(memory_id)
         now = datetime.utcnow().isoformat()
         data["working_memory"].append({"role": "user", "content": user_msg, "ts": now})
@@ -50,7 +53,7 @@ class LayeredMemoryStore:
 
         self.save(memory_id, data)
 
-    def render_context(self, memory_id: int) -> str:
+    def render_context(self, memory_id: str) -> str:
         data = self.load(memory_id)
         working_lines = [f"{m['role']}: {m['content']}" for m in data["working_memory"]]
         working_text = "\n".join(working_lines) if working_lines else "暂无"
@@ -64,14 +67,14 @@ class LayeredMemoryStore:
             f"{working_text}"
         )
 
-    def is_first_session(self, memory_id: int) -> bool:
+    def is_first_session(self, memory_id: str) -> bool:
         data = self.load(memory_id)
         has_working = len(data.get("working_memory", [])) > 0
         has_summary = bool(data.get("short_term_summary", "").strip())
         has_facts = len(data.get("long_term_facts", [])) > 0
         return not (has_working or has_summary or has_facts)
 
-    def maybe_auto_compress(self, memory_id: int) -> bool:
+    def maybe_auto_compress(self, memory_id: str) -> bool:
         data = self.load(memory_id)
         combined_text = "\n".join([m["content"] for m in data["working_memory"]])
         if len(combined_text) < settings.auto_compress_trigger_chars:
@@ -79,7 +82,7 @@ class LayeredMemoryStore:
         self.compress(memory_id)
         return True
 
-    def compress(self, memory_id: int) -> dict:
+    def compress(self, memory_id: str) -> dict:
         data = self.load(memory_id)
         history = "\n".join([f"{m['role']}: {m['content']}" for m in data["working_memory"]])
         if not history.strip():
