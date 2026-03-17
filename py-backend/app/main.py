@@ -116,10 +116,13 @@ def compress_memory(payload: CompressMemoryForm):
             raise HTTPException(status_code=401, detail="invalid userId")
     scoped_memory_id = f"user_{payload.userId}_mem_{payload.memoryId}"
     data = zoe_graph.memory_store.compress(scoped_memory_id)
+    session_facts_count = len(data.get("session_facts", data.get("long_term_facts", [])))
     return {
         "memoryId": scoped_memory_id,
         "short_term_summary": data.get("short_term_summary", ""),
-        "long_term_facts_count": len(data.get("long_term_facts", [])),
+        "session_facts_count": session_facts_count,
+        # 兼容前端既有字段
+        "long_term_facts_count": session_facts_count,
         "last_compressed_at": data.get("last_compressed_at"),
     }
 

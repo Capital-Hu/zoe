@@ -55,7 +55,7 @@ class ZoeGraph:
         return workflow.compile()
 
     def _load_memory(self, state: ChatState) -> ChatState:
-        memory_context = self.memory_store.render_context(state["memory_id"])
+        memory_context = self.memory_store.render_context(state["memory_id"], state.get("question", ""))
         is_first_session = self.memory_store.is_first_session(state["memory_id"])
         return {"memory_context": memory_context, "is_first_session": is_first_session}
 
@@ -135,7 +135,12 @@ class ZoeGraph:
         return {"answer": answer, "tool_trace": tool_trace}
 
     def _save_memory(self, state: ChatState) -> ChatState:
-        self.memory_store.add_turn(state["memory_id"], state["question"], state.get("answer", ""))
+        self.memory_store.add_turn(
+            state["memory_id"],
+            state["question"],
+            state.get("answer", ""),
+            tool_trace=state.get("tool_trace", []),
+        )
         self.memory_store.maybe_auto_compress(state["memory_id"])
 
         # 每一轮会话都记录上下文日志，便于回放和排障

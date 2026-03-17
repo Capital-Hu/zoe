@@ -5,7 +5,7 @@
 ## 功能
   - 入参：`{ "userId": 1, "memoryId": "123", "message": "你好" }`
   - 入参：`{ "userId": 1, "memoryId": "123" }`
-- 分层记忆：工作记忆 + 短期摘要 + 长期事实
+- 分层记忆：函数调用工作记忆（dict）+ 会话短期记忆（队列滑窗）+ 长期记忆轻路由检索（BM25）+ 用户结构化长期记忆（按 userId 聚合）
 - 提示词外置：统一放在 `py-backend/prompts/`
 - Agent Function Calling：分导诊、查号源、预约、取消预约、记录查询
 - 手动压缩记忆接口：`POST /zoe/memory/compress`
@@ -41,6 +41,8 @@ conda run -n zoe pip install -r requirements.txt
   - `MONGO_DB=zoe`
   - `MONGO_MEMORY_COLLECTION=layered_memory`
   - `MONGO_CONVERSATION_COLLECTION=conversation_sessions`
+  - `MONGO_USER_PROFILE_COLLECTION=user_profiles`
+  - `LONG_TERM_MEMORY_TOP_K=3`
   - `MONGO_TIMEOUT_MS=3000`
 
 ### macOS 启动 MongoDB（Homebrew）
@@ -182,7 +184,14 @@ Agent 可调用以下工具（由后端执行）：
 
 - 业务数据库：`py-backend/data/zoe.db`（SQLite）
 - 分层记忆：MongoDB 集合（默认 `zoe.layered_memory`）
+- 用户结构化长期记忆：MongoDB 集合（默认 `zoe.user_profiles`，按 `user_id` 聚合）
 - 会话信息：MongoDB 集合（默认 `zoe.conversation_sessions`）
 - 会话日志：`py-backend/data/logs/conversation_*.jsonl`（保留，便于排障和人工查看）
+
+说明：
+
+- 函数调用工作记忆保存在会话文档字段 `tool_working_memory`（dict），包含：`intent`、`required_fields`、`collected_fields`、`missing_fields`、`status`、`last_tool_calls`
+- 会话短期记忆继续采用滑动窗口（`WORKING_MEMORY_WINDOW`）
+- 长期记忆采用轻路由：仅在问题命中“历史/继续/复诊/过敏/慢病”等记忆意图时触发 BM25 检索
 
 会话隔离策略：后端会把 `userId + memoryId` 组合成作用域 ID（例如 `user_1_mem_123`），不同账号的会话与日志天然隔离。

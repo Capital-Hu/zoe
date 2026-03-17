@@ -28,10 +28,12 @@ class Settings(BaseSettings):
     min_score: float = Field(default=0.2, alias="MIN_SCORE")
     working_memory_window: int = Field(default=6, alias="WORKING_MEMORY_WINDOW")
     auto_compress_trigger_chars: int = Field(default=2200, alias="AUTO_COMPRESS_TRIGGER_CHARS")
+    long_term_memory_top_k: int = Field(default=3, alias="LONG_TERM_MEMORY_TOP_K")
     mongo_uri: str = Field(default="mongodb://localhost:27017", alias="MONGO_URI")
     mongo_db: str = Field(default="zoe", alias="MONGO_DB")
     mongo_memory_collection: str = Field(default="layered_memory", alias="MONGO_MEMORY_COLLECTION")
     mongo_conversation_collection: str = Field(default="conversation_sessions", alias="MONGO_CONVERSATION_COLLECTION")
+    mongo_user_profile_collection: str = Field(default="user_profiles", alias="MONGO_USER_PROFILE_COLLECTION")
     mongo_timeout_ms: int = Field(default=3000, alias="MONGO_TIMEOUT_MS")
 
     @property
