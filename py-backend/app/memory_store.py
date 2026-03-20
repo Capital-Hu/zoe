@@ -80,7 +80,7 @@ class LayeredMemoryStore:
         if not doc:
             return base
         base["working_memory"] = list(doc.get("working_memory", []))
-        base["short_term_summary"] = str(doc.get("short_term_summary", "") or "")
+        base["short_term_summary"] = self._clean_short_term_summary(str(doc.get("short_term_summary", "") or ""))
         # 兼容旧字段 long_term_facts，迁移到会话稳定事实 session_facts
         facts = doc.get("session_facts")
         if facts is None:
@@ -302,6 +302,17 @@ class LayeredMemoryStore:
             return {}
         return data if isinstance(data, dict) else {}
 
+    def _clean_short_term_summary(self, text: str) -> str:
+        summary = str(text or "").strip()
+        if not summary:
+            return ""
+
+        # 清理历史格式里遗留的标签文本，避免污染 [短期摘要] 展示。
+        summary = re.sub(r"^1\.\s*\*{0,2}concise_summary\*{0,2}\s*[：:]\s*", "", summary, flags=re.IGNORECASE)
+        summary = re.sub(r"^short_term_summary\s*[：:]\s*", "", summary, flags=re.IGNORECASE)
+        summary = re.split(r"\n\s*2\.\s*\*{0,2}session_facts\*{0,2}\s*[：:]\s*", summary, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        return summary
+
     def load(self, memory_id: str) -> dict:
         safe_id = self._safe_memory_id(memory_id)
         doc = self._session_collection.find_one({"memory_id": safe_id}, {"_id": 0})
@@ -474,20 +485,41 @@ class LayeredMemoryStore:
         res = self.llm.invoke([HumanMessage(content=prompt)])
         text = res.content if isinstance(res.content, str) else str(res.content)
 
-        summary = text.strip()
+        summary = ""
         facts: list[str] = []
-        left = text.find("[")
-        right = text.rfind("]")
-        if left != -1 and right != -1 and right > left:
-            json_part = text[left : right + 1]
-            try:
-                parsed = json.loads(json_part)
-                if isinstance(parsed, list):
-                    facts = [str(x) for x in parsed][:20]
-                    summary = text[:left].strip()
-            except json.JSONDecodeError:
-                pass
 
+        # 新协议：优先解析严格 JSON 对象
+        parsed_obj = self._extract_json_object(text)
+        if parsed_obj:
+            summary = str(
+                parsed_obj.get("short_term_summary")
+                or ""
+            ).strip()
+            raw_facts = parsed_obj.get("session_facts", [])
+            if isinstance(raw_facts, str):
+                try:
+                    raw_facts = json.loads(raw_facts)
+                except json.JSONDecodeError:
+                    raw_facts = []
+            if isinstance(raw_facts, list):
+                facts = [str(x).strip() for x in raw_facts if str(x).strip()][:20]
+
+        # 兼容旧协议：文本摘要 + JSON 数组
+        if not summary and not facts:
+            summary = text.strip()
+            left = text.find("[")
+            right = text.rfind("]")
+            if left != -1 and right != -1 and right > left:
+                json_part = text[left : right + 1]
+                try:
+                    parsed = json.loads(json_part)
+                    if isinstance(parsed, list):
+                        facts = [str(x).strip() for x in parsed if str(x).strip()][:20]
+                        summary = text[:left].strip()
+                except json.JSONDecodeError:
+                    pass
+
+        summary = self._clean_short_term_summary(summary)
         if summary:
             data["short_term_summary"] = summary[:800]
         if facts:

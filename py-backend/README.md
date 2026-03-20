@@ -6,6 +6,7 @@
   - 入参：`{ "userId": 1, "memoryId": "123", "message": "你好" }`
   - 入参：`{ "userId": 1, "memoryId": "123" }`
 - 分层记忆：函数调用工作记忆（dict）+ 会话短期记忆（队列滑窗）+ 长期记忆轻路由检索（BM25）+ 用户结构化长期记忆（按 userId 聚合）
+- 自动记忆压缩：按 `AUTO_COMPRESS_TRIGGER_CHARS` 阈值触发（默认 2200 字符）
 - 提示词外置：统一放在 `py-backend/prompts/`
 - Agent Function Calling：分导诊、查号源、预约、取消预约、记录查询
 - 手动压缩记忆接口：`POST /zoe/memory/compress`
@@ -128,9 +129,15 @@ PYTHONPATH=. python scripts/seed_mock_data.py
 - 脚本文件：`py-backend/scripts/seed_mock_data.py`
 - 脚本会先重建表结构再写入 mock 数据（便于开发阶段迁移）
 - 默认写入：
-  - 用户表 `users`：5 条
-  - 医生排班表 `doctor_schedules`：6 条
-  - 预约表 `appointments`：5 条
+  - 用户表 `users`：120 条
+  - 医生排班表 `doctor_schedules`：3600 条
+  - 预约表 `appointments`：8400 条
+
+当前 mock 生成策略：
+
+- 15 个科室 × 每科 4 位医生 × 未来 30 天 × 上午/下午双时段自动生成排班
+- 自动混入部分 `STOPPED` 停诊排班（含 `stop_reason`）
+- 预约数据按排班剩余号源规则自动生成，便于预约/取消/查询链路压测
 
 可选验证：
 
@@ -192,6 +199,21 @@ Agent 可调用以下工具（由后端执行）：
 
 - 函数调用工作记忆保存在会话文档字段 `tool_working_memory`（dict），包含：`intent`、`required_fields`、`collected_fields`、`missing_fields`、`status`、`last_tool_calls`
 - 会话短期记忆继续采用滑动窗口（`WORKING_MEMORY_WINDOW`）
+- 自动压缩按字符阈值触发（`AUTO_COMPRESS_TRIGGER_CHARS`，默认 2200）；即使轮次较多，只要窗口内字符数未达到阈值也不会自动压缩
+- 触发压缩后会写入 `short_term_summary`、`session_facts`，并同步更新 `user_profiles`（用户结构化长期记忆）
+- 若需立即生成长期画像，可手动调用 `POST /zoe/memory/compress`
 - 长期记忆采用轻路由：仅在问题命中“历史/继续/复诊/过敏/慢病”等记忆意图时触发 BM25 检索
 
 会话隔离策略：后端会把 `userId + memoryId` 组合成作用域 ID（例如 `user_1_mem_123`），不同账号的会话与日志天然隔离。
+
+## 常见排查
+
+- 现象：已经聊了很多轮，但 `layered_memory.last_compressed_at` 仍为空
+  - 原因：自动压缩基于“窗口内字符数”而不是“轮次”触发
+  - 处理：
+    - 调低 `.env` 中 `AUTO_COMPRESS_TRIGGER_CHARS`（例如改为 1200）
+    - 或手动调用 `POST /zoe/memory/compress`
+
+- 现象：`user_profiles` 里没有该用户画像
+  - 原因：用户画像在压缩阶段同步提取，未触发压缩前可能为空
+  - 处理：手动压缩一次后再查看 `zoe.user_profiles`
