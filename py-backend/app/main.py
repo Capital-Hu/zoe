@@ -96,14 +96,11 @@ def chat(payload: ChatForm):
         if not account:
             raise HTTPException(status_code=401, detail="invalid userId")
     scoped_memory_id = f"user_{payload.userId}_mem_{payload.memoryId}"
-    answer = zoe_graph.run(memory_id=scoped_memory_id, question=payload.message)
-
-    def text_stream():
-        # 兼容前端流式追加逻辑，按小块返回
-        for i in range(0, len(answer), 8):
-            yield answer[i : i + 8]
-
-    return StreamingResponse(text_stream(), media_type="text/stream;charset=utf-8")
+    return StreamingResponse(
+        zoe_graph.run_stream(memory_id=scoped_memory_id, question=payload.message),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/zoe/memory/compress")

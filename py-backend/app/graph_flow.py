@@ -162,3 +162,96 @@ class ZoeGraph:
     def run(self, memory_id: str, question: str) -> str:
         result = self.graph.invoke({"memory_id": memory_id, "question": question})
         return result.get("answer", "")
+
+    def run_stream(self, memory_id: str, question: str):
+        """Generator that yields SSE-formatted events for streaming chat."""
+        # Phase 1 & 2: load memory + retrieve docs (non-streaming)
+        state: ChatState = {"memory_id": memory_id, "question": question}
+        state.update(self._load_memory(state))
+        state.update(self._retrieve_docs(state))
+
+        system_prompt = render_prompt(
+            "chat_system_prompt.txt",
+            current_date=date.today().isoformat(),
+            is_first_session="是" if state.get("is_first_session", False) else "否",
+            memory_context=state.get("memory_context", ""),
+            retrieved_context=state.get("retrieved_context", ""),
+        )
+        user_prompt = f"用户问题:\n{state['question']}"
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        llm_to_use = self.tool_enabled_llm or self.llm
+        answer_parts: list[str] = []
+        tool_trace: list[dict[str, Any]] = []
+
+        # Phase 3: streaming generation with tool-calling loop
+        max_rounds = 4
+        for _ in range(max_rounds):
+            gathered = None
+            round_tokens: list[str] = []
+
+            for chunk in llm_to_use.stream(messages):
+                if gathered is None:
+                    gathered = chunk
+                else:
+                    gathered = gathered + chunk
+                token = chunk.content if isinstance(chunk.content, str) else ""
+                if token:
+                    round_tokens.append(token)
+                    yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+
+            if gathered is None:
+                break
+
+            messages.append(gathered)
+            tool_calls = getattr(gathered, "tool_calls", []) or []
+
+            if not tool_calls:
+                answer_parts = round_tokens
+                break
+
+            # Execute tool calls (non-streaming)
+            for call in tool_calls:
+                tool_name = call.get("name", "")
+                args = call.get("args", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"input": args}
+
+                tool = self.tool_map.get(tool_name)
+                if not tool:
+                    tool_result = f"工具 {tool_name} 不存在。"
+                else:
+                    try:
+                        tool_result = str(tool.invoke(args))
+                    except Exception as exc:
+                        tool_result = f"工具 {tool_name} 执行失败：{exc}"
+
+                tool_trace.append(
+                    {"tool": tool_name, "args": args, "result": tool_result}
+                )
+                messages.append(
+                    ToolMessage(content=tool_result, tool_call_id=call.get("id", ""))
+                )
+        else:
+            # Exhausted all rounds — do one final streaming call
+            if not answer_parts:
+                for chunk in llm_to_use.stream(messages):
+                    token = chunk.content if isinstance(chunk.content, str) else ""
+                    if token:
+                        answer_parts.append(token)
+                        yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+
+        answer = "".join(answer_parts)
+
+        # Phase 4: save memory & log
+        state["answer"] = answer
+        state["tool_trace"] = tool_trace
+        self._save_memory(state)
+
+        yield "data: [DONE]\n\n"

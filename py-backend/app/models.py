@@ -16,7 +16,7 @@ def build_chat_model():
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
         temperature=0.3,
-        streaming=False,
+        streaming=True,
     )
 
 

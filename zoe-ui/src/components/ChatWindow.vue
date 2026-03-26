@@ -166,7 +166,7 @@ const sendMessage = () => {
   }
 };
 
-const sendRequest = (message) => {
+const sendRequest = async (message) => {
   isSending.value = true;
   messages.value.push({
     isUser: true,
@@ -175,41 +175,68 @@ const sendRequest = (message) => {
     isThinking: false,
   });
 
-  const botMsg = {
+  messages.value.push({
     isUser: false,
     content: '',
     isTyping: true,
     isThinking: false,
-  };
-  messages.value.push(botMsg);
+  });
   const lastMsg = messages.value[messages.value.length - 1];
   scrollToBottom();
 
-  axios
-    .post(
-      '/api/zoe/chat',
-      { userId: currentUser.value.userId, memoryId: String(uuid.value), message },
-      {
-        responseType: 'stream',
-        onDownloadProgress: (e) => {
-          const fullText = e.event.target.responseText;
-          const newText = fullText.substring(lastMsg.content.length);
-          lastMsg.content += newText;
-          scrollToBottom();
-        },
-      }
-    )
-    .then(() => {
-      messages.value.at(-1).isTyping = false;
-      loadSessions();
-      isSending.value = false;
-    })
-    .catch((error) => {
-      console.error('流式错误:', error);
-      messages.value.at(-1).content = '请求失败，请重试';
-      messages.value.at(-1).isTyping = false;
-      isSending.value = false;
+  try {
+    const response = await fetch('/api/zoe/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: currentUser.value.userId,
+        memoryId: String(uuid.value),
+        message,
+      }),
     });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.token) {
+            lastMsg.content += parsed.token;
+            scrollToBottom();
+          }
+        } catch {
+          // ignore malformed SSE lines
+        }
+      }
+    }
+
+    lastMsg.isTyping = false;
+    loadSessions();
+  } catch (error) {
+    console.error('流式错误:', error);
+    lastMsg.content = '请求失败，请重试';
+    lastMsg.isTyping = false;
+  } finally {
+    isSending.value = false;
+  }
 };
 
 const initUUID = () => {
