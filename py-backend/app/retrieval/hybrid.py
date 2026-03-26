@@ -11,7 +11,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rank_bm25 import BM25Okapi
 
-from app.config import settings
+from app.core.config import settings
 
 
 class HybridRetriever:
@@ -38,8 +38,8 @@ class HybridRetriever:
                 loaded = PyPDFLoader(str(file)).load()
             else:
                 loaded = TextLoader(str(file), encoding="utf-8").load()
-            for d in loaded:
-                d.metadata["source"] = str(file)
+            for document in loaded:
+                document.metadata["source"] = str(file)
             docs.extend(loaded)
         splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=120)
         return splitter.split_documents(docs)
@@ -62,8 +62,8 @@ class HybridRetriever:
         if self.meta_path.exists() and self.bm25_path.exists():
             meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
             docs = [Document(page_content=item["page_content"], metadata=item["metadata"]) for item in meta]
-            with self.bm25_path.open("rb") as f:
-                bm25 = pickle.load(f)
+            with self.bm25_path.open("rb") as file_obj:
+                bm25 = pickle.load(file_obj)
             return bm25, docs
 
         if self.meta_path.exists():
@@ -72,15 +72,15 @@ class HybridRetriever:
         else:
             docs = self._load_documents()
             serializable = [
-                {"page_content": d.page_content, "metadata": d.metadata}
-                for d in docs
+                {"page_content": document.page_content, "metadata": document.metadata}
+                for document in docs
             ]
             self.meta_path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        tokenized_corpus = [list(jieba.cut(d.page_content)) for d in docs]
+        tokenized_corpus = [list(jieba.cut(document.page_content)) for document in docs]
         bm25 = BM25Okapi(tokenized_corpus)
-        with self.bm25_path.open("wb") as f:
-            pickle.dump(bm25, f)
+        with self.bm25_path.open("wb") as file_obj:
+            pickle.dump(bm25, file_obj)
         return bm25, docs
 
     def corpus_size(self) -> int:
@@ -89,16 +89,15 @@ class HybridRetriever:
     def _bm25_search(self, query: str, top_k: int) -> list[Document]:
         tokens = list(jieba.cut(query))
         scores = self.bm25.get_scores(tokens)
-        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
-        return [self.bm25_docs[i] for i in top_indices]
+        top_indices = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)[:top_k]
+        return [self.bm25_docs[index] for index in top_indices]
 
     def _vector_search(self, query: str, top_k: int) -> list[Document]:
         pairs = self.vector_store.similarity_search_with_score(query, k=top_k)
         docs: list[Document] = []
-        for doc, score in pairs:
-            # FAISS 距离越小越相似，这里做一个粗略过滤
+        for document, score in pairs:
             if score <= (1.0 / max(settings.min_score, 0.01)):
-                docs.append(doc)
+                docs.append(document)
         return docs
 
     def retrieve(self, query: str, top_k: int | None = None) -> list[Document]:
@@ -106,19 +105,18 @@ class HybridRetriever:
         vector_docs = self._vector_search(query, k)
         bm25_docs = self._bm25_search(query, k)
 
-        # Reciprocal Rank Fusion 融合两个检索结果
         combined: dict[str, tuple[float, Document]] = {}
-        for rank, doc in enumerate(vector_docs, start=1):
-            key = doc.page_content
+        for rank, document in enumerate(vector_docs, start=1):
+            key = document.page_content
             score = 1.0 / (60 + rank)
             prev = combined.get(key)
-            combined[key] = ((prev[0] if prev else 0.0) + score, doc)
+            combined[key] = ((prev[0] if prev else 0.0) + score, document)
 
-        for rank, doc in enumerate(bm25_docs, start=1):
-            key = doc.page_content
+        for rank, document in enumerate(bm25_docs, start=1):
+            key = document.page_content
             score = 1.0 / (60 + rank)
             prev = combined.get(key)
-            combined[key] = ((prev[0] if prev else 0.0) + score, doc)
+            combined[key] = ((prev[0] if prev else 0.0) + score, document)
 
-        ranked = sorted(combined.values(), key=lambda x: x[0], reverse=True)
-        return [doc for _, doc in ranked[:k]]
+        ranked = sorted(combined.values(), key=lambda item: item[0], reverse=True)
+        return [document for _, document in ranked[:k]]

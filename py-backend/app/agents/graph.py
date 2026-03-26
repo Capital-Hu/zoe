@@ -7,9 +7,9 @@ from typing import Any, TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
-from app.agent_tools import get_agent_tools
-from app.conversation_logger import ConversationLogger
-from app.prompt_loader import render_prompt
+from app.agents.tools import get_agent_tools
+from app.memory.conversation_logger import ConversationLogger
+from app.utils.prompt_loader import render_prompt
 
 
 class ChatState(TypedDict, total=False):
@@ -45,13 +45,11 @@ class ZoeGraph:
         workflow.add_node("retrieve_docs", self._retrieve_docs)
         workflow.add_node("generate_answer", self._generate_answer)
         workflow.add_node("save_memory", self._save_memory)
-
         workflow.set_entry_point("load_memory")
         workflow.add_edge("load_memory", "retrieve_docs")
         workflow.add_edge("retrieve_docs", "generate_answer")
         workflow.add_edge("generate_answer", "save_memory")
         workflow.add_edge("save_memory", END)
-
         return workflow.compile()
 
     def _load_memory(self, state: ChatState) -> ChatState:
@@ -62,8 +60,8 @@ class ZoeGraph:
     def _retrieve_docs(self, state: ChatState) -> ChatState:
         docs = self.retriever.retrieve(state["question"])
         joined = "\n\n".join([
-            f"[来源]{d.metadata.get('source', 'unknown')}\n{d.page_content}"
-            for d in docs
+            f"[来源]{doc.metadata.get('source', 'unknown')}\n{doc.page_content}"
+            for doc in docs
         ])
         return {"retrieved_context": joined}
 
@@ -76,25 +74,19 @@ class ZoeGraph:
             retrieved_context=state.get("retrieved_context", ""),
         )
         user_prompt = f"用户问题:\n{state['question']}"
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
+        messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
 
-        # 不支持 function calling 的模型直接回退普通问答
         if self.tool_enabled_llm is None:
-            res = self.llm.invoke(messages)
-            answer = res.content if isinstance(res.content, str) else str(res.content)
+            response = self.llm.invoke(messages)
+            answer = response.content if isinstance(response.content, str) else str(response.content)
             return {"answer": answer}
 
-        # 执行函数调用循环：模型决定调用工具 -> 执行工具 -> 把结果喂回模型
         max_rounds = 4
         answer = ""
         tool_trace: list[dict[str, Any]] = []
         for _ in range(max_rounds):
             ai_msg = self.tool_enabled_llm.invoke(messages)
             messages.append(ai_msg)
-
             tool_calls = getattr(ai_msg, "tool_calls", []) or []
             if not tool_calls:
                 answer = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
@@ -118,14 +110,7 @@ class ZoeGraph:
                     except Exception as exc:
                         tool_result = f"工具 {tool_name} 执行失败：{exc}"
 
-                tool_trace.append(
-                    {
-                        "tool": tool_name,
-                        "args": args,
-                        "result": tool_result,
-                    }
-                )
-
+                tool_trace.append({"tool": tool_name, "args": args, "result": tool_result})
                 messages.append(ToolMessage(content=tool_result, tool_call_id=call.get("id", "")))
 
         if not answer:
@@ -142,8 +127,6 @@ class ZoeGraph:
             tool_trace=state.get("tool_trace", []),
         )
         self.memory_store.maybe_auto_compress(state["memory_id"])
-
-        # 每一轮会话都记录上下文日志，便于回放和排障
         try:
             self.conversation_logger.log_turn(
                 memory_id=state["memory_id"],
@@ -154,9 +137,7 @@ class ZoeGraph:
                 tool_trace=state.get("tool_trace", []),
             )
         except Exception:
-            # 日志失败不影响主流程
             pass
-
         return {}
 
     def run(self, memory_id: str, question: str) -> str:
@@ -164,8 +145,6 @@ class ZoeGraph:
         return result.get("answer", "")
 
     def run_stream(self, memory_id: str, question: str):
-        """Generator that yields SSE-formatted events for streaming chat."""
-        # Phase 1 & 2: load memory + retrieve docs (non-streaming)
         state: ChatState = {"memory_id": memory_id, "question": question}
         state.update(self._load_memory(state))
         state.update(self._retrieve_docs(state))
@@ -178,16 +157,12 @@ class ZoeGraph:
             retrieved_context=state.get("retrieved_context", ""),
         )
         user_prompt = f"用户问题:\n{state['question']}"
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
+        messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
 
         llm_to_use = self.tool_enabled_llm or self.llm
         answer_parts: list[str] = []
         tool_trace: list[dict[str, Any]] = []
 
-        # Phase 3: streaming generation with tool-calling loop
         max_rounds = 4
         for _ in range(max_rounds):
             gathered = None
@@ -198,22 +173,20 @@ class ZoeGraph:
                     gathered = chunk
                 else:
                     gathered = gathered + chunk
-                token = chunk.content if isinstance(chunk.content, str) else ""
-                if token:
-                    round_tokens.append(token)
-                    yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+                if getattr(chunk, "content", None):
+                    text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                    round_tokens.append(text)
+                    yield f"data: {json.dumps({'token': text}, ensure_ascii=False)}\n\n"
 
             if gathered is None:
                 break
 
             messages.append(gathered)
             tool_calls = getattr(gathered, "tool_calls", []) or []
-
             if not tool_calls:
-                answer_parts = round_tokens
+                answer_parts.extend(round_tokens)
                 break
 
-            # Execute tool calls (non-streaming)
             for call in tool_calls:
                 tool_name = call.get("name", "")
                 args = call.get("args", {})
@@ -232,26 +205,27 @@ class ZoeGraph:
                     except Exception as exc:
                         tool_result = f"工具 {tool_name} 执行失败：{exc}"
 
-                tool_trace.append(
-                    {"tool": tool_name, "args": args, "result": tool_result}
-                )
-                messages.append(
-                    ToolMessage(content=tool_result, tool_call_id=call.get("id", ""))
-                )
-        else:
-            # Exhausted all rounds — do one final streaming call
-            if not answer_parts:
-                for chunk in llm_to_use.stream(messages):
-                    token = chunk.content if isinstance(chunk.content, str) else ""
-                    if token:
-                        answer_parts.append(token)
-                        yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+                tool_trace.append({"tool": tool_name, "args": args, "result": tool_result})
+                messages.append(ToolMessage(content=tool_result, tool_call_id=call.get("id", "")))
 
-        answer = "".join(answer_parts)
+        answer = "".join(answer_parts).strip()
+        if not answer:
+            final_msg = llm_to_use.invoke(messages)
+            answer = final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
+            if answer:
+                yield f"data: {json.dumps({'token': answer}, ensure_ascii=False)}\n\n"
 
-        # Phase 4: save memory & log
-        state["answer"] = answer
-        state["tool_trace"] = tool_trace
-        self._save_memory(state)
-
+        self.memory_store.add_turn(memory_id, question, answer, tool_trace=tool_trace)
+        self.memory_store.maybe_auto_compress(memory_id)
+        try:
+            self.conversation_logger.log_turn(
+                memory_id=memory_id,
+                question=question,
+                answer=answer,
+                memory_context=state.get("memory_context", ""),
+                retrieved_context=state.get("retrieved_context", ""),
+                tool_trace=tool_trace,
+            )
+        except Exception:
+            pass
         yield "data: [DONE]\n\n"

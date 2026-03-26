@@ -2,14 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
-from app.config import settings
-
-
-class Base(DeclarativeBase):
-    pass
+from app.db.base import Base
 
 
 class Account(Base):
@@ -63,12 +59,3 @@ class Appointment(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="BOOKED")
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-
-settings.data_dir.mkdir(parents=True, exist_ok=True)
-engine = create_engine(f"sqlite:///{settings.data_dir / 'zoe.db'}", future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
-
-
-def init_db() -> None:
-    Base.metadata.create_all(bind=engine)

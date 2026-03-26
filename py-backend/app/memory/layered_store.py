@@ -10,8 +10,8 @@ import jieba
 from langchain_core.messages import HumanMessage
 from rank_bm25 import BM25Okapi
 
-from app.config import settings
-from app.prompt_loader import render_prompt
+from app.core.config import settings
+from app.utils.prompt_loader import render_prompt
 
 
 class LayeredMemoryStore:
@@ -26,7 +26,6 @@ class LayeredMemoryStore:
         self._client = mongo_client_cls(settings.mongo_uri, serverSelectionTimeoutMS=settings.mongo_timeout_ms)
         self._session_collection: Any = self._client[settings.mongo_db][settings.mongo_memory_collection]
         self._profile_collection: Any = self._client[settings.mongo_db][settings.mongo_user_profile_collection]
-        # 启动时尽早校验连接，避免运行中才发现不可用
         self._client.admin.command("ping")
         self._session_collection.create_index("memory_id", unique=True)
         self._session_collection.create_index("user_id")
@@ -81,11 +80,10 @@ class LayeredMemoryStore:
             return base
         base["working_memory"] = list(doc.get("working_memory", []))
         base["short_term_summary"] = self._clean_short_term_summary(str(doc.get("short_term_summary", "") or ""))
-        # 兼容旧字段 long_term_facts，迁移到会话稳定事实 session_facts
         facts = doc.get("session_facts")
         if facts is None:
             facts = doc.get("long_term_facts", [])
-        base["session_facts"] = [str(x).strip() for x in list(facts or []) if str(x).strip()]
+        base["session_facts"] = [str(item).strip() for item in list(facts or []) if str(item).strip()]
         base["tool_working_memory"] = self._normalize_tool_working_memory(doc.get("tool_working_memory"))
         base["last_compressed_at"] = doc.get("last_compressed_at")
         return base
@@ -95,10 +93,10 @@ class LayeredMemoryStore:
         if not isinstance(data, dict):
             return base
         base["intent"] = str(data.get("intent", "") or "")
-        base["required_fields"] = [str(x) for x in list(data.get("required_fields", []) or []) if str(x)]
+        base["required_fields"] = [str(item) for item in list(data.get("required_fields", []) or []) if str(item)]
         collected = data.get("collected_fields", {}) if isinstance(data.get("collected_fields", {}), dict) else {}
-        base["collected_fields"] = {str(k): str(v) for k, v in collected.items() if str(v).strip()}
-        base["missing_fields"] = [str(x) for x in list(data.get("missing_fields", []) or []) if str(x)]
+        base["collected_fields"] = {str(key): str(value) for key, value in collected.items() if str(value).strip()}
+        base["missing_fields"] = [str(item) for item in list(data.get("missing_fields", []) or []) if str(item)]
         base["status"] = str(data.get("status", "idle") or "idle")
         calls = list(data.get("last_tool_calls", []) or [])
         normalized_calls: list[dict[str, Any]] = []
@@ -128,7 +126,7 @@ class LayeredMemoryStore:
             "id_card": str(identity.get("id_card", "") or "").strip(),
         }
         for key in ("medical_history", "allergies", "medications", "preferences", "care_plan"):
-            base[key] = [str(x).strip() for x in list(profile.get(key, []) or []) if str(x).strip()]
+            base[key] = [str(item).strip() for item in list(profile.get(key, []) or []) if str(item).strip()]
         items = list(profile.get("long_term_memory_items", []) or [])
         normalized_items: list[dict[str, str]] = []
         for item in items[:200]:
@@ -147,7 +145,7 @@ class LayeredMemoryStore:
         return base
 
     def _infer_intent(self, question: str, tool_trace: list[dict[str, Any]]) -> str:
-        tool_names = [str(t.get("tool", "") or "") for t in tool_trace]
+        tool_names = [str(item.get("tool", "") or "") for item in tool_trace]
         if "book_appointment" in tool_names:
             return "book_appointment"
         if "cancel_appointment" in tool_names:
@@ -159,16 +157,16 @@ class LayeredMemoryStore:
         if "recommend_department" in tool_names:
             return "recommend_department"
 
-        q = question.strip()
-        if any(k in q for k in ("挂号", "预约", "约号")):
+        question_text = question.strip()
+        if any(keyword in question_text for keyword in ("挂号", "预约", "约号")):
             return "book_appointment"
-        if any(k in q for k in ("取消", "退号")):
+        if any(keyword in question_text for keyword in ("取消", "退号")):
             return "cancel_appointment"
-        if any(k in q for k in ("号源", "有号", "余号")):
+        if any(keyword in question_text for keyword in ("号源", "有号", "余号")):
             return "check_registration_slots"
-        if any(k in q for k in ("预约记录", "记录查询", "我的预约")):
+        if any(keyword in question_text for keyword in ("预约记录", "记录查询", "我的预约")):
             return "query_appointment_records"
-        if any(k in q for k in ("挂什么科", "什么科", "分诊", "导诊")):
+        if any(keyword in question_text for keyword in ("挂什么科", "什么科", "分诊", "导诊")):
             return "recommend_department"
         return ""
 
@@ -182,12 +180,7 @@ class LayeredMemoryStore:
         }
         return mapping.get(intent, [])
 
-    def _build_tool_working_memory(
-        self,
-        question: str,
-        tool_trace: list[dict[str, Any]],
-        previous: dict | None,
-    ) -> dict:
+    def _build_tool_working_memory(self, question: str, tool_trace: list[dict[str, Any]], previous: dict | None) -> dict:
         prev = self._normalize_tool_working_memory(previous)
         intent = self._infer_intent(question, tool_trace) or prev.get("intent", "")
         required_fields = self._required_fields_for_intent(intent)
@@ -200,7 +193,7 @@ class LayeredMemoryStore:
                 if value:
                     collected[key] = value
 
-        missing_fields = [f for f in required_fields if not collected.get(f)]
+        missing_fields = [field for field in required_fields if not collected.get(field)]
         status = "idle"
         if intent:
             if tool_trace and not missing_fields:
@@ -233,8 +226,8 @@ class LayeredMemoryStore:
         }
 
     def _should_route_long_term(self, question: str) -> bool:
-        q = (question or "").strip()
-        if not q:
+        query = (question or "").strip()
+        if not query:
             return False
         memory_keywords = (
             "之前",
@@ -250,31 +243,30 @@ class LayeredMemoryStore:
             "我的情况",
             "按之前",
         )
-        return any(k in q for k in memory_keywords)
+        return any(keyword in query for keyword in memory_keywords)
 
     def _retrieve_long_term_memory(self, memory_id: str, query: str) -> list[str]:
         profile = self.load_user_profile(memory_id)
         items = profile.get("long_term_memory_items", [])
         texts = [str(item.get("text", "") or "").strip() for item in items if isinstance(item, dict)]
-        texts = [x for x in texts if x]
+        texts = [item for item in texts if item]
         if not texts:
             return []
 
-        tokenized = [list(jieba.cut(t)) for t in texts]
+        tokenized = [list(jieba.cut(text)) for text in texts]
         bm25 = BM25Okapi(tokenized)
         scores = bm25.get_scores(list(jieba.cut(query)))
         top_k = max(1, settings.long_term_memory_top_k)
-        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
-        picked = [texts[i] for i in ranked[:top_k] if scores[i] > 0]
-        return picked
+        ranked = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)
+        return [texts[index] for index in ranked[:top_k] if scores[index] > 0]
 
     def _upsert_long_term_memory_items(self, memory_id: str, items: list[str]) -> None:
-        clean_items = [str(x).strip() for x in items if str(x).strip()]
+        clean_items = [str(item).strip() for item in items if str(item).strip()]
         if not clean_items:
             return
         profile = self.load_user_profile(memory_id)
         existing = profile.get("long_term_memory_items", [])
-        existing_texts = [str(x.get("text", "") or "").strip() for x in existing if isinstance(x, dict)]
+        existing_texts = [str(item.get("text", "") or "").strip() for item in existing if isinstance(item, dict)]
         merged_texts = self._merge_unique(existing_texts, clean_items, limit=200)
         now = datetime.utcnow().isoformat()
         profile["long_term_memory_items"] = [{"text": text, "ts": now} for text in merged_texts]
@@ -307,7 +299,6 @@ class LayeredMemoryStore:
         if not summary:
             return ""
 
-        # 清理历史格式里遗留的标签文本，避免污染 [短期摘要] 展示。
         summary = re.sub(r"^1\.\s*\*{0,2}concise_summary\*{0,2}\s*[：:]\s*", "", summary, flags=re.IGNORECASE)
         summary = re.sub(r"^short_term_summary\s*[：:]\s*", "", summary, flags=re.IGNORECASE)
         summary = re.split(r"\n\s*2\.\s*\*{0,2}session_facts\*{0,2}\s*[：:]\s*", summary, maxsplit=1, flags=re.IGNORECASE)[0].strip()
@@ -373,10 +364,9 @@ class LayeredMemoryStore:
             ("preferences", "就医偏好"),
             ("care_plan", "就医计划"),
         ):
-            values = [str(x).strip() for x in profile.get(key, []) if str(x).strip()]
-            if not values:
-                continue
-            lines.append(f"- {label}: {'；'.join(values[:6])}")
+            values = [str(item).strip() for item in profile.get(key, []) if str(item).strip()]
+            if values:
+                lines.append(f"- {label}: {'；'.join(values[:6])}")
         return "\n".join(lines) if lines else "- 暂无"
 
     def _extract_user_profile_delta(self, memory_id: str, history: str) -> dict:
@@ -400,11 +390,9 @@ class LayeredMemoryStore:
             "patient_name": str(identity_delta.get("patient_name") or current["identity"].get("patient_name") or "").strip(),
             "id_card": str(identity_delta.get("id_card") or current["identity"].get("id_card") or "").strip(),
         }
-
         for key in ("medical_history", "allergies", "medications", "preferences", "care_plan"):
-            delta_items = [str(x).strip() for x in list(delta.get(key, []) or []) if str(x).strip()]
+            delta_items = [str(item).strip() for item in list(delta.get(key, []) or []) if str(item).strip()]
             merged[key] = self._merge_unique(current.get(key, []), delta_items)
-
         self.save_user_profile(memory_id, merged)
 
     def add_turn(self, memory_id: str, user_msg: str, ai_msg: str, tool_trace: list[dict[str, Any]] | None = None) -> None:
@@ -417,19 +405,16 @@ class LayeredMemoryStore:
             tool_trace=tool_trace or [],
             previous=data.get("tool_working_memory", {}),
         )
-
-        # 保留工作记忆窗口
         max_items = settings.working_memory_window * 2
         data["working_memory"] = data["working_memory"][-max_items:]
-
         self.save(memory_id, data)
 
     def render_context(self, memory_id: str, question: str | None = None) -> str:
         data = self.load(memory_id)
         user_profile = self.load_user_profile(memory_id)
-        working_lines = [f"{m['role']}: {m['content']}" for m in data["working_memory"]]
+        working_lines = [f"{message['role']}: {message['content']}" for message in data["working_memory"]]
         working_text = "\n".join(working_lines) if working_lines else "暂无"
-        session_facts = "\n".join(f"- {x}" for x in data["session_facts"])
+        session_facts = "\n".join(f"- {item}" for item in data["session_facts"])
         profile_text = self._render_profile_text(user_profile)
         task_state = self._normalize_tool_working_memory(data.get("tool_working_memory"))
         task_text = "- 暂无"
@@ -444,7 +429,7 @@ class LayeredMemoryStore:
         routed_long_term = []
         if self._should_route_long_term(question or ""):
             routed_long_term = self._retrieve_long_term_memory(memory_id, question or "")
-        routed_text = "\n".join([f"- {x}" for x in routed_long_term]) if routed_long_term else "- 本轮未命中长期记忆路由或无相关结果"
+        routed_text = "\n".join([f"- {item}" for item in routed_long_term]) if routed_long_term else "- 本轮未命中长期记忆路由或无相关结果"
         return (
             "[短期摘要]\n"
             f"{data['short_term_summary'] or '暂无'}\n\n"
@@ -469,7 +454,7 @@ class LayeredMemoryStore:
 
     def maybe_auto_compress(self, memory_id: str) -> bool:
         data = self.load(memory_id)
-        combined_text = "\n".join([m["content"] for m in data["working_memory"]])
+        combined_text = "\n".join([message["content"] for message in data["working_memory"]])
         if len(combined_text) < settings.auto_compress_trigger_chars:
             return False
         self.compress(memory_id)
@@ -477,7 +462,7 @@ class LayeredMemoryStore:
 
     def compress(self, memory_id: str) -> dict:
         data = self.load(memory_id)
-        history = "\n".join([f"{m['role']}: {m['content']}" for m in data["working_memory"]])
+        history = "\n".join([f"{message['role']}: {message['content']}" for message in data["working_memory"]])
         if not history.strip():
             return data
 
@@ -487,14 +472,9 @@ class LayeredMemoryStore:
 
         summary = ""
         facts: list[str] = []
-
-        # 新协议：优先解析严格 JSON 对象
         parsed_obj = self._extract_json_object(text)
         if parsed_obj:
-            summary = str(
-                parsed_obj.get("short_term_summary")
-                or ""
-            ).strip()
+            summary = str(parsed_obj.get("short_term_summary") or "").strip()
             raw_facts = parsed_obj.get("session_facts", [])
             if isinstance(raw_facts, str):
                 try:
@@ -502,9 +482,8 @@ class LayeredMemoryStore:
                 except json.JSONDecodeError:
                     raw_facts = []
             if isinstance(raw_facts, list):
-                facts = [str(x).strip() for x in raw_facts if str(x).strip()][:20]
+                facts = [str(item).strip() for item in raw_facts if str(item).strip()][:20]
 
-        # 兼容旧协议：文本摘要 + JSON 数组
         if not summary and not facts:
             summary = text.strip()
             left = text.find("[")
@@ -514,7 +493,7 @@ class LayeredMemoryStore:
                 try:
                     parsed = json.loads(json_part)
                     if isinstance(parsed, list):
-                        facts = [str(x).strip() for x in parsed if str(x).strip()][:20]
+                        facts = [str(item).strip() for item in parsed if str(item).strip()][:20]
                         summary = text[:left].strip()
                 except json.JSONDecodeError:
                     pass
@@ -526,13 +505,12 @@ class LayeredMemoryStore:
             data["session_facts"] = self._merge_unique(data["session_facts"], facts, limit=50)
             self._upsert_long_term_memory_items(memory_id, facts)
 
-        # 同步更新用户级结构化长期记忆，跨会话复用
         try:
             delta = self._extract_user_profile_delta(memory_id, history)
             self._merge_user_profile(memory_id, delta)
             extracted_items: list[str] = []
             for key in ("medical_history", "allergies", "medications", "preferences", "care_plan"):
-                extracted_items.extend([str(x).strip() for x in list(delta.get(key, []) or []) if str(x).strip()])
+                extracted_items.extend([str(item).strip() for item in list(delta.get(key, []) or []) if str(item).strip()])
             identity = delta.get("identity") if isinstance(delta.get("identity"), dict) else {}
             if str(identity.get("patient_name", "") or "").strip():
                 extracted_items.append(f"姓名: {str(identity.get('patient_name', '')).strip()}")
@@ -540,10 +518,8 @@ class LayeredMemoryStore:
                 extracted_items.append(f"身份证号: {str(identity.get('id_card', '')).strip()}")
             self._upsert_long_term_memory_items(memory_id, extracted_items)
         except Exception:
-            # 画像抽取失败不影响主流程
             pass
 
-        # 压缩后只保留最近两轮在工作记忆中
         data["working_memory"] = data["working_memory"][-4:]
         data["last_compressed_at"] = datetime.utcnow().isoformat()
         self.save(memory_id, data)

@@ -1,138 +1,270 @@
-# Zoe 项目 Memory 机制梳理
+# Zoe Memory 架构说明
 
-本文用于快速复习本项目中所有 memory 相关机制，重点回答 3 个问题：
+本文基于当前代码实现整理，重点回答 4 个问题：
 
-1. memory 存在哪
-2. 在哪个时间点写入或压缩
-3. 每轮到底以什么格式给模型
+1. 现在系统到底有几层 memory，各自存什么
+2. 一次聊天请求从进入到结束，在哪些时间点会读取、写入、压缩 memory
+3. 会话记忆、短期记忆、长期记忆、日志之间到底是什么关系
+4. 每个字段是在什么时机被查询、更新、使用的
 
-## 1. Memory 总览
+当前实现对应代码：
 
-本项目的 memory 可以分为 3 层。
+- 会话入口：[py-backend/app/main.py](py-backend/app/main.py)
+- 图流程：[py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)
+- Memory 主逻辑：[py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py)
+- 会话日志：[py-backend/app/memory/conversation_logger.py](py-backend/app/memory/conversation_logger.py)
+- 主问答提示词：[py-backend/prompts/chat_system_prompt.txt](py-backend/prompts/chat_system_prompt.txt)
+- 压缩提示词：[py-backend/prompts/memory_compress_prompt.txt](py-backend/prompts/memory_compress_prompt.txt)
+- 用户画像抽取提示词：[py-backend/prompts/user_profile_extract_prompt.txt](py-backend/prompts/user_profile_extract_prompt.txt)
 
-### 1.1 会话级分层记忆（同一个 memoryId）
+## 1. 一句话结论
 
-- 存储位置：MongoDB 集合 `zoe.layered_memory`（可由环境变量覆盖）
-- 代码入口：`py-backend/app/memory_store.py`
-- 主键维度：`memory_id`（格式示例：`user_1_mem_311984`）
-- 核心字段：
-  - `working_memory`
-  - `short_term_summary`
-  - `session_facts`
-  - `tool_working_memory`
-  - `last_compressed_at`
+当前系统不是“会话记忆”和“短期记忆”两套并列系统，而是：
 
-用途：承载当前会话近期上下文、会话稳定事实、工具调用槽位状态。
+- 会话级 memory 是一整套容器，按单个 memoryId 隔离
+- 这个容器内部再拆成原始窗口、压缩摘要、会话事实、工具工作记忆几个部分
+- 用户级长期结构记忆按 userId 隔离，跨会话复用
+- 对话日志单独存，主要用于回放、排障、历史查询，不直接作为下一轮 prompt 的主输入
 
-### 1.2 用户级长期结构化画像（跨会话）
+更准确的理解应该是：
+
+- 会话记忆 = 当前会话的一整套状态
+- 短期记忆 = 会话记忆中的“近期原始窗口 + 压缩摘要”这部分能力
+
+也就是说，短期记忆不是独立于会话记忆之外的第四层，而是会话记忆内部的一部分。
+
+## 2. 当前实际存在的 3 类存储
+
+### 2.1 会话级分层记忆
+
+- 存储位置：MongoDB 集合 `zoe.layered_memory`
+- 主键维度：`memory_id`
+- 代码入口：[py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py)
+- 作用：支撑“下一轮怎么答”
+
+它保存的是当前一个会话内真正会进入模型上下文的核心状态，包含：
+
+- `working_memory`：最近若干轮原始消息窗口
+- `short_term_summary`：对更早历史做的压缩摘要
+- `session_facts`：当前会话内比较稳定、后续可能复用的事实
+- `tool_working_memory`：工具调用流程中的槽位、意图、缺失字段、最近工具调用状态
+- `last_compressed_at`：上次压缩时间
+
+这是主 memory。下一轮问答时，系统优先读取的就是这里。
+
+### 2.2 用户级长期结构记忆
 
 - 存储位置：MongoDB 集合 `zoe.user_profiles`
-- 代码入口：`py-backend/app/memory_store.py`
 - 主键维度：`user_id`
-- 核心字段：
-  - `profile.identity.patient_name`
-  - `profile.identity.id_card`
-  - `profile.medical_history`
-  - `profile.allergies`
-  - `profile.medications`
-  - `profile.preferences`
-  - `profile.care_plan`
-  - `profile.long_term_memory_items`
+- 代码入口：[py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py)
+- 作用：跨不同 memoryId 复用用户长期信息
 
-用途：跨不同 memoryId 复用用户长期信息。
+它不是记录完整聊天过程，而是保留用户长期可复用信息，包括：
 
-### 1.3 会话日志（回放与排障）
+- `identity`：姓名、身份证号
+- `medical_history`：病史
+- `allergies`：过敏史
+- `medications`：长期用药
+- `preferences`：偏好
+- `care_plan`：就医计划
+- `long_term_memory_items`：可检索的长期记忆条目
+
+这一层解决的是“换一个会话还能不能记住这个人”。
+
+### 2.3 完整对话日志
 
 - 存储位置：
+  - MongoDB 集合 `zoe.conversation_sessions`
   - 本地 JSONL：`py-backend/data/logs/conversation_*.jsonl`
-  - MongoDB：`zoe.conversation_sessions`
-- 代码入口：`py-backend/app/conversation_logger.py`
+- 代码入口：[py-backend/app/memory/conversation_logger.py](py-backend/app/memory/conversation_logger.py)
+- 作用：回放、审计、排障、会话列表查询
 
-用途：会话列表和详情查询、问题排查。不是分层记忆主存储。
+这一层记录的是每轮实际发生了什么，包括：
 
-## 2. 请求进入后的时间线
+- 用户问了什么
+- 模型答了什么
+- 当时注入给模型的 `memory_context`
+- 当时命中的检索结果 `retrieved_context`
+- 本轮工具调用轨迹 `tool_trace`
 
-聊天请求入口：`POST /zoe/chat`
+这层通常不参与“下一轮 prompt 拼装”，它更像操作日志而不是思考内存。
 
-请求体字段：
+## 3. 会话记忆和短期记忆到底有什么区别
+
+这是最容易混淆的点。
+
+### 3.1 当前代码里，并没有一个单独名为“短期记忆集合”的东西
+
+当前实现里只有一个会话级 memory 文档，但里面拆成不同信息密度层次：
+
+| 概念 | 对应字段 | 含义 |
+|------|----------|------|
+| 即时工作记忆 | `working_memory` | 最近几轮原始对话，保留细节 |
+| 压缩短期记忆 | `short_term_summary` | 对更早对话的中文摘要 |
+| 会话稳定事实 | `session_facts` | 当前会话内可复用的稳定事实 |
+| 工具工作记忆 | `tool_working_memory` | 工具链路的槽位状态 |
+
+所以：
+
+- `working_memory` 偏原文保留
+- `short_term_summary` 偏压缩后的短期记忆
+- `session_facts` 偏结构化会话事实
+
+三者合起来才是完整的会话记忆。
+
+### 3.2 一个更容易理解的说法
+
+如果要给产品或文档命名，建议统一成下面这种表达：
+
+- 会话记忆（Session Memory）
+  - 近期原始窗口：`working_memory`
+  - 压缩摘要：`short_term_summary`
+  - 会话事实：`session_facts`
+  - 工具状态：`tool_working_memory`
+
+这样比把“会话记忆”和“短期记忆”并列写更清晰。
+
+### 3.3 这种设计对不对
+
+这套设计是合理的，而且很适合医疗问答 + 就医流程助手场景。
+
+原因是：
+
+- 只存原始消息会越来越长，prompt 成本失控
+- 只存摘要会丢掉最近轮次细节，影响多轮连续交互
+- 只存结构化事实又无法覆盖自然对话中的临时上下文
+- 工具调用流程需要单独的槽位状态，否则用户补字段时容易断线
+
+因此当前实现采用“原始窗口 + 摘要 + 事实 + 工具状态”的组合，是对的。
+
+## 4. 一次聊天请求的完整触发流程
+
+聊天入口是 `POST /zoe/chat`，请求体包含：
+
 - `userId`
 - `memoryId`
 - `message`
 
-后端先拼接作用域 memoryId：
-- `scoped_memory_id = user_{userId}_mem_{memoryId}`
+后端会先把它拼成作用域会话 ID：
 
-然后执行 LangGraph 固定流程：
-- `load_memory` -> `retrieve_docs` -> `generate_answer` -> `save_memory`
+- `user_{userId}_mem_{memoryId}`
 
-### T1 load_memory
+这个 scoped memoryId 会同时用于：
 
-- 调用 `memory_store.render_context(memory_id, question)` 生成 `memory_context`
-- 调用 `memory_store.is_first_session(memory_id)` 生成首次会话标记
+- 会话级记忆隔离
+- 日志隔离
+- 关联 userId 提取长期结构记忆
 
-输出到状态：
+### 4.1 总流程图
+
+```mermaid
+flowchart TD
+    A[POST /zoe/chat] --> B[拼接 scoped memoryId]
+    B --> C[load_memory]
+    C --> C1[读取 layered_memory]
+    C --> C2[读取 user_profiles]
+    C --> C3[按问题判断是否路由长期记忆检索]
+    C1 --> D[render_context 生成 memory_context]
+    C2 --> D
+    C3 --> D
+    D --> E[retrieve_docs]
+    E --> E1[知识库混合检索]
+    E1 --> F[generate_answer]
+    F --> F1[系统提示词注入 memory_context + retrieved_context]
+    F1 --> F2{是否触发工具调用}
+    F2 -- 否 --> G[得到 answer]
+    F2 -- 是 --> F3[执行工具]
+    F3 --> F4[将 ToolMessage 回喂模型]
+    F4 --> G
+    G --> H[save_memory]
+    H --> H1[add_turn 写 working_memory]
+    H --> H2[更新 tool_working_memory]
+    H --> H3[maybe_auto_compress]
+    H3 -->|达到阈值| H4[compress]
+    H4 --> H5[更新 short_term_summary]
+    H4 --> H6[更新 session_facts]
+    H4 --> H7[更新 user_profiles]
+    H4 --> H8[更新 long_term_memory_items]
+    H --> I[log_turn 记录 JSONL + Mongo 会话日志]
+    I --> J[返回回答]
+```
+
+### 4.2 LangGraph 节点顺序
+
+图流程固定为：
+
+- `load_memory`
+- `retrieve_docs`
+- `generate_answer`
+- `save_memory`
+
+定义在 [py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)。
+
+## 5. 每个阶段具体做什么
+
+### 5.1 load_memory
+
+位置：[py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)
+
+这个阶段做两件事：
+
+1. 调用 `memory_store.render_context(memory_id, question)` 生成 `memory_context`
+2. 调用 `memory_store.is_first_session(memory_id)` 判断是否首次会话
+
+其中 `render_context` 内部会：
+
+1. 从 `layered_memory` 读取当前会话文档
+2. 从 `user_profiles` 读取当前用户长期结构记忆
+3. 根据当前问题判断要不要触发长期记忆路由检索
+4. 把上述内容拼成一段纯文本 `memory_context`
+
+### 5.2 retrieve_docs
+
+位置：[py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)
+
+调用混合检索器查知识库，并将结果拼成：
+
+- `[来源]{source}`
+- 文档正文内容
+
+最终组成 `retrieved_context`。
+
+### 5.3 generate_answer
+
+位置：[py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)
+
+这个阶段会把下面内容一起交给模型：
+
+- 系统提示词模板：[py-backend/prompts/chat_system_prompt.txt](py-backend/prompts/chat_system_prompt.txt)
+- 当前日期
+- 是否首次会话
 - `memory_context`
-- `is_first_session`
-
-### T2 retrieve_docs
-
-- 调用混合检索器 `retriever.retrieve(question)`
-- 将每个文档拼成：
-  - `[来源]{source}\n{page_content}`
-- 最终拼接为一个大字符串 `retrieved_context`
-
-输出到状态：
 - `retrieved_context`
+- 用户本轮问题
 
-### T3 generate_answer
+如果模型支持 function calling，还会进入一个最多 4 轮的工具调用循环：
 
-构建系统提示词：
-- 模板文件：`py-backend/prompts/chat_system_prompt.txt`
-- 注入变量：
-  - `current_date`
-  - `is_first_session`
-  - `memory_context`
-  - `retrieved_context`
+1. 模型判断是否要调用工具
+2. 后端执行工具
+3. 工具结果被封装成 `ToolMessage`
+4. 回喂给模型继续推理
+5. 所有工具调用都会累积到 `tool_trace`
 
-用户消息格式：
-- `用户问题:\n{question}`
+### 5.4 save_memory
 
-消息结构：
-- `SystemMessage(content=system_prompt)`
-- `HumanMessage(content=user_prompt)`
+位置：[py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)
 
-若模型支持 function calling：
-- 模型可能返回 `tool_calls`
-- 后端执行工具后，把结果封装为 `ToolMessage`
-- 再回喂模型继续推理（最多 4 轮）
-- 本轮工具调用痕迹累计在 `tool_trace`，每项格式：
-  - `{"tool": "...", "args": {...}, "result": "..."}`
+这个阶段分三步：
 
-### T4 save_memory
+1. `add_turn`：写入本轮问答到 `working_memory`
+2. `maybe_auto_compress`：按阈值决定是否压缩
+3. `log_turn`：将完整过程写入会话日志
 
-先写会话级记忆：
-- `add_turn(memory_id, question, answer, tool_trace)`
-- 具体动作：
-  - 追加 2 条 working_memory（user + assistant）
-  - 更新 `tool_working_memory`（意图、已收集槽位、缺失槽位、状态、近期工具调用）
-  - 依据 `WORKING_MEMORY_WINDOW` 裁剪窗口
+## 6. 模型每轮到底看到什么 memory
 
-再尝试自动压缩：
-- `maybe_auto_compress(memory_id)`
-- 触发条件：working_memory 合并文本长度 >= `AUTO_COMPRESS_TRIGGER_CHARS`
+下一轮回答时，真正进入系统提示词的是 `memory_context`，它由 [py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py) 中的 `render_context` 拼装。
 
-最后写日志（双写）：
-- JSONL：每轮一行
-- Mongo 会话集合：用于列表和详情
-
-## 3. 每轮给模型的上下文到底是什么
-
-每轮主问答时，系统提示词里会包含两段关键注入：
-
-- `[记忆上下文]` 对应 `memory_context`
-- `[检索上下文]` 对应 `retrieved_context`
-
-其中 `memory_context` 是 `render_context` 生成的纯文本，固定 6 个区块：
+它固定包含 6 个区块，顺序如下：
 
 1. `[短期摘要]`
 2. `[会话稳定事实]`
@@ -141,144 +273,252 @@
 5. `[用户结构化长期记忆]`
 6. `[工作记忆]`
 
-这 6 个区块按顺序拼接后，整体替换进系统提示模板中的 `{{memory_context}}`。
+也就是说，模型拿到的不是数据库原文，而是一个已经组织好的文本上下文。
 
-`retrieved_context` 则是知识库检索结果拼接文本，替换 `{{retrieved_context}}`。
+### 6.1 render_context 结构图
 
-## 4. 压缩机制细节
+```mermaid
+flowchart TD
+    A[render_context(memory_id, question)] --> B[load layered_memory]
+    A --> C[load user_profiles]
+    A --> D{是否命中长期记忆路由关键词}
+    D -- 是 --> E[BM25 检索 long_term_memory_items]
+    D -- 否 --> F[跳过长期记忆检索]
+    B --> G[短期摘要]
+    B --> H[会话稳定事实]
+    B --> I[函数调用工作记忆]
+    B --> J[工作记忆]
+    C --> K[用户结构化长期记忆]
+    E --> L[长期记忆检索结果]
+    F --> L
+    G --> M[memory_context]
+    H --> M
+    I --> M
+    L --> M
+    K --> M
+    J --> M
+```
 
-### 4.1 触发方式
+## 7. 自动压缩是怎么触发的
 
-- 自动触发：每轮 `save_memory` 后检查长度阈值
-- 手动触发：`POST /zoe/memory/compress`
+### 7.1 触发时机
 
-### 4.2 压缩输入
+每轮回答结束后，在 `save_memory` 阶段调用：
 
-- 输入是当前 `working_memory` 展平后的 `history` 文本
-- 使用模板：`py-backend/prompts/memory_compress_prompt.txt`
+- `maybe_auto_compress(memory_id)`
 
-### 4.3 压缩输出解析
+### 7.2 触发条件
 
-后端优先期望模型返回严格 JSON 对象：
+它会把当前 `working_memory` 展平后计算总文本长度，如果达到阈值：
 
-- `short_term_summary`
-- `session_facts`
+- 配置项：`AUTO_COMPRESS_TRIGGER_CHARS`
+- 默认值：2200
 
-解析策略：
+定义在 [py-backend/app/core/config.py](py-backend/app/core/config.py)。
 
-- 优先按 JSON 对象解析并写入 `short_term_summary`、`session_facts`
-- 兼容旧格式（文本摘要 + JSON 数组）作为回退路径
-- 不再解析 `concise_summary` 字段；仅接受 `short_term_summary`
-- 对摘要做历史标签清洗后再入库（用于迁移旧脏数据）
-- `session_facts` 同步合并进长期条目 `long_term_memory_items`
+### 7.3 压缩时做了什么
 
-### 4.4 压缩后的裁剪
+压缩逻辑在 [py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py) 的 `compress` 中，顺序如下：
 
-- 压缩完成后，`working_memory` 只保留最近 2 轮（4 条消息）
+1. 把 `working_memory` 展平成 `history`
+2. 用 [py-backend/prompts/memory_compress_prompt.txt](py-backend/prompts/memory_compress_prompt.txt) 调模型
+3. 解析模型返回的 JSON
+4. 更新 `short_term_summary`
+5. 更新 `session_facts`
+6. 把 `session_facts` 合并进 `long_term_memory_items`
+7. 用 [py-backend/prompts/user_profile_extract_prompt.txt](py-backend/prompts/user_profile_extract_prompt.txt) 抽取用户画像增量
+8. 更新 `user_profiles`
+9. 将画像增量也合并进 `long_term_memory_items`
+10. 只保留最近 2 轮到 `working_memory`
+11. 更新 `last_compressed_at`
 
-## 5. 用户长期画像抽取
+### 7.4 压缩流程图
 
-在 `compress` 过程中会额外调用画像抽取：
+```mermaid
+flowchart TD
+    A[maybe_auto_compress] --> B{working_memory 总长度 >= 阈值?}
+    B -- 否 --> C[结束 不压缩]
+    B -- 是 --> D[compress]
+    D --> E[基于 history 生成 short_term_summary + session_facts]
+    E --> F[写回 layered_memory]
+    E --> G[session_facts 合并进 long_term_memory_items]
+    D --> H[抽取用户画像 delta]
+    H --> I[merge 到 user_profiles]
+    I --> J[画像条目补充进 long_term_memory_items]
+    F --> K[working_memory 只保留最近 4 条消息]
+    J --> K
+    K --> L[更新 last_compressed_at]
+```
 
-1. 用 `user_profile_extract_prompt.txt` + 当前历史 + 当前画像
-2. 让模型返回严格 JSON：
-   - `identity`
-   - `medical_history`
-   - `allergies`
-   - `medications`
-   - `preferences`
-   - `care_plan`
-3. 与现有画像做 merge 去重
-4. 回写 `user_profiles`
+## 8. 长期记忆什么时候查，什么时候写
 
-这一步实现了“跨会话可复用”的结构化长期记忆更新。
+### 8.1 长期记忆查询时机
 
-## 6. long_term_memory_items 路由检索
+长期记忆不是每轮都全量塞给模型，而是分两种方式参与。
 
-`render_context` 时会判断当前问题是否命中长期记忆路由关键词（如“之前、上次、过敏、慢病、按之前”等）。
+#### 方式 A：用户结构化长期记忆
 
-命中后：
-- 在 `user_profiles.long_term_memory_items` 上做 BM25 检索
-- 取 TopK（配置项 `LONG_TERM_MEMORY_TOP_K`）
-- 结果写入 `[长期记忆检索结果]` 区块
+每次 `render_context` 都会查 `user_profiles`，并把用户画像转成文本放进：
 
-未命中则写固定提示：
-- 本轮未命中长期记忆路由或无相关结果
+- `[用户结构化长期记忆]`
 
-## 7. 字段级对照表（复习版）
+这部分是固定可见的。
 
-### 7.1 layered_memory（会话级）
+#### 方式 B：长期记忆条目检索
 
-- `working_memory`
-  - 来源：每轮 user/assistant 对话追加
-  - 写入时机：`add_turn`
-  - 是否进 prompt：是，进入 `[工作记忆]`
-- `short_term_summary`
-  - 来源：压缩模型输出摘要
-  - 写入时机：`compress`
-  - 是否进 prompt：是，进入 `[短期摘要]`
-- `session_facts`
-  - 来源：压缩模型输出事实数组
-  - 写入时机：`compress`
-  - 是否进 prompt：是，进入 `[会话稳定事实]`
-- `tool_working_memory`
-  - 来源：每轮根据 `question + tool_trace` 推断
-  - 写入时机：`add_turn`
-  - 是否进 prompt：是，进入 `[函数调用工作记忆]`
+只有当前问题命中长期记忆路由关键词时，才会在 `long_term_memory_items` 上做 BM25 检索，结果放进：
 
-### 7.2 user_profiles（用户级）
+- `[长期记忆检索结果]`
 
-- `identity / medical_history / allergies / medications / preferences / care_plan`
-  - 来源：画像抽取模型输出 + merge
-  - 写入时机：`compress`
-  - 是否进 prompt：是，进入 `[用户结构化长期记忆]`
-- `long_term_memory_items`
-  - 来源：`session_facts` 与画像增量条目同步合并
-  - 写入时机：`compress`
-  - 是否进 prompt：间接是。仅在命中路由时检索后进入 `[长期记忆检索结果]`
+当前命中的关键词包括：
 
-### 7.3 conversation_sessions / JSONL（日志）
+- `之前`
+- `上次`
+- `还记得`
+- `历史`
+- `长期`
+- `继续`
+- `复诊`
+- `过敏`
+- `慢病`
+- `我的信息`
+- `我的情况`
+- `按之前`
 
-- `question / answer / memory_context / retrieved_context / tool_trace`
-  - 来源：每轮执行结果
-  - 写入时机：`save_memory` 末尾 `log_turn`
-  - 是否进 prompt：否（主要用于回放与排障）
+实现位置：[py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py)。
 
-## 8. 常见混淆点
+### 8.2 长期记忆写入时机
 
-### 8.1 为什么看起来有很多 memory
+长期记忆条目不是每轮都写，而是在压缩时写入：
 
-因为系统把“会话即时记忆、用户长期画像、会话日志”拆成了不同职责和不同集合。
+1. `session_facts` 会合并进 `long_term_memory_items`
+2. 用户画像抽取出来的病史、过敏史、偏好等也会合并进 `long_term_memory_items`
 
-### 8.2 哪些会直接影响下一轮回答
+所以长期记忆是“压缩后沉淀”的，而不是“每轮即时写”。
 
-会直接影响下一轮主模型回答的是：
-- `memory_context`（由 layered_memory + user_profiles + long_term 路由检索拼成）
-- `retrieved_context`（知识库检索）
+这也是合理的，因为长期记忆应该尽量稳定，避免把临时噪音过早写进去。
 
-### 8.3 日志和记忆的关系
+## 9. 日志层为什么基本不用动
 
-日志会存下当轮的 memory_context 和 retrieved_context 快照，便于复盘；
-但日志本身不是下一轮 prompt 的直接输入源。
+你的理解是对的。
 
-## 9. 关键代码索引
+日志层的职责主要是：
 
-- 会话入口与 scoped memoryId：`py-backend/app/main.py`
-- 图流程节点：`py-backend/app/graph_flow.py`
-- 分层记忆与压缩：`py-backend/app/memory_store.py`
-- 会话日志：`py-backend/app/conversation_logger.py`
-- 提示词渲染：`py-backend/app/prompt_loader.py`
-- 主问答提示词：`py-backend/prompts/chat_system_prompt.txt`
-- 记忆压缩提示词：`py-backend/prompts/memory_compress_prompt.txt`
-- 用户画像抽取提示词：`py-backend/prompts/user_profile_extract_prompt.txt`
+- 留痕
+- 回放
+- 排障
+- 支撑历史会话接口
 
-## 10. 复习建议
+它不是主推理 memory，所以通常不用频繁优化结构，除非你要做：
 
-建议按以下顺序快速过一遍代码：
+- 会话列表/详情接口增强
+- 审计字段增强
+- 查询性能优化
+- 日志清理归档策略
 
-1. 先看 `main.py` 的 `/zoe/chat` 和 `/zoe/memory/compress`
-2. 再看 `graph_flow.py` 的 4 个节点
-3. 接着看 `memory_store.py` 的 `render_context -> add_turn -> maybe_auto_compress -> compress`
-4. 最后看 `conversation_logger.py` 理解日志双写
+在当前架构下，日志层保持“尽量完整地记录发生了什么”就够了。
 
-这样阅读时最不容易混淆。
+## 10. 字段生命周期总表
+
+### 10.1 layered_memory
+
+| 字段 | 存储层 | 写入时机 | 查询时机 | 用途 |
+|------|--------|----------|----------|------|
+| `working_memory` | 会话级 | 每轮 `add_turn` | 每轮 `render_context` | 保留最近几轮原始细节 |
+| `short_term_summary` | 会话级 | `compress` | 每轮 `render_context` | 提供压缩后的近期背景 |
+| `session_facts` | 会话级 | `compress` | 每轮 `render_context` | 提供会话内稳定事实 |
+| `tool_working_memory` | 会话级 | 每轮 `add_turn` | 每轮 `render_context` | 支撑工具流程连续性 |
+| `last_compressed_at` | 会话级 | `compress` | 一般不进 prompt | 标记上次压缩时间 |
+
+### 10.2 user_profiles
+
+| 字段 | 存储层 | 写入时机 | 查询时机 | 用途 |
+|------|--------|----------|----------|------|
+| `identity` | 用户级 | `compress` 中画像抽取后 | 每轮 `render_context` | 跨会话复用身份信息 |
+| `medical_history` | 用户级 | `compress` | 每轮 `render_context` | 病史长期保留 |
+| `allergies` | 用户级 | `compress` | 每轮 `render_context` | 过敏信息长期保留 |
+| `medications` | 用户级 | `compress` | 每轮 `render_context` | 长期用药长期保留 |
+| `preferences` | 用户级 | `compress` | 每轮 `render_context` | 偏好长期保留 |
+| `care_plan` | 用户级 | `compress` | 每轮 `render_context` | 就医计划长期保留 |
+| `long_term_memory_items` | 用户级 | `compress` | 命中路由时检索 | 作为长期条目库 |
+
+### 10.3 会话日志
+
+| 字段 | 存储层 | 写入时机 | 查询时机 | 用途 |
+|------|--------|----------|----------|------|
+| `question` | 日志层 | 每轮 `log_turn` | 回放/排障 | 保存用户输入 |
+| `answer` | 日志层 | 每轮 `log_turn` | 回放/排障 | 保存模型输出 |
+| `memory_context` | 日志层 | 每轮 `log_turn` | 回放/排障 | 记录当轮注入的记忆快照 |
+| `retrieved_context` | 日志层 | 每轮 `log_turn` | 回放/排障 | 记录当轮检索快照 |
+| `tool_trace` | 日志层 | 每轮 `log_turn` | 回放/排障 | 记录工具调用轨迹 |
+
+## 11. 当前设计是否合理
+
+结论：当前设计整体是合理的，不需要推翻。
+
+### 11.1 合理点
+
+- 会话级与用户级做了明确隔离
+- 会话内同时保留原始窗口和压缩摘要，兼顾细节与成本
+- 工具调用状态被单独建模，适合预约、取消、查号源这类槽位任务
+- 长期记忆只在压缩后沉淀，避免把噪音过早写入长期层
+- 日志层和推理 memory 解耦，职责清晰
+
+### 11.2 需要统一的命名认知
+
+真正要修正的不是代码，而是术语。
+
+建议你以后统一这样说：
+
+- 会话记忆：指 `layered_memory` 整体
+- 短期记忆：指会话记忆里用于承接最近上下文的部分，主要是 `working_memory + short_term_summary`
+- 长期结构记忆：指 `user_profiles`
+- 对话日志：指 `conversation_sessions + JSONL`
+
+只要术语统一，整个设计就会好懂很多。
+
+## 12. 如果后面要继续完善，建议优先做什么
+
+当前不是必须改，但后续可以考虑这几项增强。
+
+### 12.1 给 session_facts 增加来源或置信度
+
+现在 `session_facts` 只是字符串数组。如果后续要做更强可解释性，可以扩展为对象，例如：
+
+- `text`
+- `source`
+- `confidence`
+- `updated_at`
+
+### 12.2 给 long_term_memory_items 增加类别标签
+
+现在长期记忆条目主要是纯文本。如果后续要提升检索精度，可以增加：
+
+- `category`，例如 `allergy`、`history`、`identity`、`preference`
+
+### 12.3 调整长期记忆路由规则
+
+目前是关键词路由，简单有效，但后续可升级为：
+
+- 关键词 + 轻量分类器
+- 或由模型判断是否需要长期记忆检索
+
+### 12.4 为日志层增加归档策略
+
+如果会话量上来，JSONL 和 Mongo 会话日志都可能持续增长，后续可以做：
+
+- 历史会话归档
+- 冷热分层
+- JSONL 清理策略
+
+## 13. 推荐的阅读顺序
+
+如果要重新理解当前实现，建议按下面顺序看代码：
+
+1. [py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)
+2. [py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py)
+3. [py-backend/app/memory/conversation_logger.py](py-backend/app/memory/conversation_logger.py)
+4. [py-backend/prompts/chat_system_prompt.txt](py-backend/prompts/chat_system_prompt.txt)
+5. [py-backend/prompts/memory_compress_prompt.txt](py-backend/prompts/memory_compress_prompt.txt)
+
+按这个顺序最容易把“主流程、memory 生成、压缩、日志”串起来。

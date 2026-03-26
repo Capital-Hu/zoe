@@ -16,7 +16,15 @@
 ## 2. 关键目录
 
 - py-backend/: Python 后端
-- py-backend/app/: 后端核心代码
+- py-backend/app/api/: FastAPI 路由层
+- py-backend/app/agents/: LangGraph 与工具调用
+- py-backend/app/core/: 配置与安全能力
+- py-backend/app/db/: SQLAlchemy 数据库模型与会话
+- py-backend/app/memory/: 会话记忆与会话日志
+- py-backend/app/retrieval/: 混合检索
+- py-backend/app/llm/: 模型装配
+- py-backend/app/schemas/: 请求模型
+- py-backend/app/utils/: 公共工具
 - py-backend/scripts/: 初始化与运维脚本
 - py-backend/prompts/: 外置提示词
 - py-backend/data/: 本地数据目录（数据库、向量索引、记忆、日志）
@@ -137,16 +145,17 @@ npm run dev
 
 ### 8.1 新增后端能力
 
-1. 在 app/schemas.py 定义请求模型
-2. 在 app/main.py 增加路由
-3. 若涉及 Agent，更新 app/agent_tools.py 或 graph 流程
-4. 更新 README
-5. 运行 smoke test
+1. 在 app/schemas/ 下定义或调整请求模型
+2. 在 app/api/routes/ 下增加或修改路由，并在 app/api/router.py 注册
+3. 若涉及 Agent，更新 app/agents/tools.py 或 app/agents/graph.py
+4. 若涉及持久化，更新 app/db/ 或 app/memory/
+5. 更新 README
+6. 运行 smoke test
 
 ### 8.2 新增 Prompt
 
 1. 在 py-backend/prompts/ 新建模板
-2. 用 app/prompt_loader.py 渲染
+2. 用 app/utils/prompt_loader.py 渲染
 3. 在调用处注入必要变量
 4. 更新 README（说明用途）
 

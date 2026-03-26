@@ -1,7 +1,7 @@
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from app.config import settings
+from app.core.config import settings
 
 
 def build_chat_model():

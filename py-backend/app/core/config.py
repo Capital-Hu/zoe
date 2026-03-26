@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(Path(__file__).resolve().parents[1] / ".env"),
+        env_file=str(Path(__file__).resolve().parents[2] / ".env"),
         env_file_encoding="utf-8",
     )
 
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     @property
     def root_dir(self) -> Path:
-        return Path(__file__).resolve().parents[2]
+        return Path(__file__).resolve().parents[3]
 
     @property
     def knowledge_dir(self) -> Path:

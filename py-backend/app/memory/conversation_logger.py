@@ -7,7 +7,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from app.config import settings
+from app.core.config import settings
 
 
 class ConversationLogger:
@@ -23,7 +23,6 @@ class ConversationLogger:
             self._collection.create_index([("user_id", 1), ("updated_at", -1)])
             self._collection.create_index("memory_id", unique=True)
         except Exception:
-            # Mongo 写会话是增强能力；即使失败也不影响主流程和 JSONL 日志
             self._collection = None
 
     def _safe_memory_id(self, memory_id: str) -> str:
@@ -38,24 +37,17 @@ class ConversationLogger:
             return None, memory_id
         return int(match.group(1)), match.group(2)
 
-    def _upsert_mongo_turn(
-        self,
-        memory_id: str,
-        question: str,
-        answer: str,
-        timestamp: str,
-    ) -> None:
+    def _upsert_mongo_turn(self, memory_id: str, question: str, answer: str, timestamp: str) -> None:
         if self._collection is None:
             return
 
         user_id, memory_suffix = self._parse_scoped_memory(memory_id)
         safe_id = self._safe_memory_id(memory_id)
-        now = timestamp
         update_doc = {
             "$set": {
                 "memory_id": safe_id,
                 "memory_suffix": memory_suffix,
-                "updated_at": now,
+                "updated_at": timestamp,
                 "last_question": question,
                 "last_answer": answer,
             },
@@ -63,13 +55,13 @@ class ConversationLogger:
             "$push": {
                 "messages": {
                     "$each": [
-                        {"role": "user", "content": question, "ts": now},
-                        {"role": "assistant", "content": answer, "ts": now},
+                        {"role": "user", "content": question, "ts": timestamp},
+                        {"role": "assistant", "content": answer, "ts": timestamp},
                     ]
                 }
             },
             "$setOnInsert": {
-                "created_at": now,
+                "created_at": timestamp,
                 "title": (question or "新会话")[:40],
             },
         }
@@ -97,70 +89,18 @@ class ConversationLogger:
             "retrieved_context": retrieved_context,
             "tool_trace": tool_trace or [],
         }
-        with self._log_path(memory_id).open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        try:
-            self._upsert_mongo_turn(memory_id=memory_id, question=question, answer=answer, timestamp=timestamp)
-        except Exception:
-            pass
+        with self._log_path(memory_id).open("a", encoding="utf-8") as file_obj:
+            file_obj.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._upsert_mongo_turn(memory_id, question, answer, timestamp)
 
     def list_sessions(self, user_id: int) -> list[dict[str, Any]]:
         if self._collection is None:
             return []
-
-        cursor = self._collection.find(
-            {"user_id": int(user_id)},
-            {
-                "_id": 0,
-                "memory_id": 1,
-                "memory_suffix": 1,
-                "title": 1,
-                "turns": 1,
-                "updated_at": 1,
-            },
-        ).sort("updated_at", -1)
-
-        items: list[dict[str, Any]] = []
-        for row in cursor:
-            memory_id = str(row.get("memory_id") or "")
-            memory_suffix = str(row.get("memory_suffix") or "")
-            if not memory_suffix and memory_id.startswith(f"user_{user_id}_mem_"):
-                memory_suffix = memory_id[len(f"user_{user_id}_mem_") :]
-            items.append(
-                {
-                    "memoryId": memory_suffix or memory_id,
-                    "scopedMemoryId": memory_id,
-                    "title": str(row.get("title") or "新会话")[:40],
-                    "turns": int(row.get("turns") or 0),
-                    "updatedAt": row.get("updated_at"),
-                }
-            )
-        return items
+        rows = self._collection.find({"user_id": user_id}, {"_id": 0, "messages": 0}).sort("updated_at", -1)
+        return list(rows)
 
     def get_session_detail(self, user_id: int, memory_id: str) -> dict[str, Any] | None:
         if self._collection is None:
             return None
-
-        scoped_memory_id = self._safe_memory_id(f"user_{user_id}_mem_{memory_id}")
-        row = self._collection.find_one(
-            {"user_id": int(user_id), "memory_id": scoped_memory_id},
-            {"_id": 0, "messages": 1, "turns": 1, "updated_at": 1, "memory_id": 1},
-        )
-        if not row:
-            return None
-
-        messages = []
-        for m in row.get("messages", []):
-            role = str(m.get("role") or "")
-            content = str(m.get("content") or "")
-            if not content:
-                continue
-            messages.append({"isUser": role == "user", "content": content})
-
-        return {
-            "memoryId": memory_id,
-            "scopedMemoryId": row.get("memory_id"),
-            "messages": messages,
-            "turns": int(row.get("turns") or 0),
-            "updatedAt": row.get("updated_at"),
-        }
+        safe_id = self._safe_memory_id(memory_id)
+        return self._collection.find_one({"user_id": user_id, "memory_id": safe_id}, {"_id": 0})

@@ -3,14 +3,31 @@
 这个目录是新的后端实现，替代原有 Java LangChain4j 对话后端。
 
 ## 功能
-  - 入参：`{ "userId": 1, "memoryId": "123", "message": "你好" }`
-  - 入参：`{ "userId": 1, "memoryId": "123" }`
-- 分层记忆：函数调用工作记忆（dict）+ 会话短期记忆（队列滑窗）+ 长期记忆轻路由检索（BM25）+ 用户结构化长期记忆（按 userId 聚合）
-- 自动记忆压缩：按 `AUTO_COMPRESS_TRIGGER_CHARS` 阈值触发（默认 2200 字符）
+
+- 流式聊天接口：`POST /zoe/chat`，入参 `{ "userId": 1, "memoryId": "123", "message": "你好" }`
+- 手动压缩记忆接口：`POST /zoe/memory/compress`，入参 `{ "userId": 1, "memoryId": "123" }`
+- 分层记忆：函数调用工作记忆 + 会话短期记忆 + 长期记忆轻路由检索 + 用户结构化长期记忆
+- 自动记忆压缩：按 `AUTO_COMPRESS_TRIGGER_CHARS` 阈值触发，默认 2200 字符
 - 提示词外置：统一放在 `py-backend/prompts/`
 - Agent Function Calling：分导诊、查号源、预约、取消预约、记录查询
-- 手动压缩记忆接口：`POST /zoe/memory/compress`
 - 业务数据表：用户表、医生排班表、预约表（SQLite）
+
+## 目录结构
+
+当前后端代码不再平铺在 `app/` 根目录，而是按职责拆分：
+
+- `app/main.py`：应用入口，只负责装配 FastAPI、启动依赖、挂载路由
+- `app/api/`：HTTP 路由与依赖
+- `app/agents/`：LangGraph 流程和 function calling 工具
+- `app/core/`：配置、安全等基础能力
+- `app/db/`：SQLAlchemy 模型、引擎、会话
+- `app/memory/`：会话记忆与会话日志
+- `app/retrieval/`：知识库混合检索
+- `app/llm/`：聊天模型与 embedding 模型装配
+- `app/schemas/`：Pydantic 请求模型
+- `app/utils/`：提示词加载等通用工具
+
+如果你要新增接口，优先在 `app/api/routes/` 下加路由；如果你要改 memory，优先在 `app/memory/` 下处理；如果你要改 Agent 工具链路，优先看 `app/agents/`。
 
 ## 环境搭建（Conda）
 

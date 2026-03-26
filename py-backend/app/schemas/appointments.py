@@ -1,27 +1,6 @@
 from pydantic import BaseModel
 
 
-class ChatForm(BaseModel):
-    userId: int
-    memoryId: str
-    message: str
-
-
-class CompressMemoryForm(BaseModel):
-    userId: int
-    memoryId: str
-
-
-class RegisterForm(BaseModel):
-    username: str
-    password: str
-
-
-class LoginForm(BaseModel):
-    username: str
-    password: str
-
-
 class AppointmentCreate(BaseModel):
     user_id: int
     patient_name: str
@@ -45,21 +24,3 @@ class AppointmentUpdate(BaseModel):
     appointment_time: str | None = None
     status: str | None = None
     note: str | None = None
-
-
-class ScheduleCreate(BaseModel):
-    doctor_name: str
-    department: str
-    schedule_date: str
-    time_of_day: str
-    total_slots: int = 20
-    available_slots: int = 20
-
-
-class ScheduleStop(BaseModel):
-    reason: str = "停诊"
-
-
-class ScheduleAdjustSlots(BaseModel):
-    total_slots: int
-    available_slots: int

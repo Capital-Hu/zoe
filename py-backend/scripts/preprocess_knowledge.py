@@ -10,9 +10,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.config import settings
-from app.models import build_embedding_model
-from app.retriever import HybridRetriever
+from app.core.config import settings
+from app.llm.bundle import build_embedding_model
+from app.retrieval import HybridRetriever
 
 
 def main() -> None:

@@ -22,6 +22,7 @@
 - 检索方式：FAISS 向量检索 + BM25 混合检索
 - 记忆架构：工作记忆 + 短期摘要 + 长期记忆
 - 记忆压缩接口：`POST /zoe/memory/compress`
+- 代码结构：按 `api / agents / memory / db / retrieval / llm / schemas / core` 分层
 
 启动方式见：`py-backend/README.md`
 

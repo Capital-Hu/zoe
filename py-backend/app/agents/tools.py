@@ -60,9 +60,9 @@ def recommend_department(symptom: str) -> str:
         (("咳嗽", "发热", "呼吸", "肺"), "呼吸与危重症医学科"),
         (("胃", "腹痛", "消化", "腹泻"), "消化内科"),
     ]
-    for keywords, dept in mapping:
-        if any(k in text for k in keywords):
-            return f"建议优先挂号：{dept}。如症状加重请及时线下就医。"
+    for keywords, department in mapping:
+        if any(keyword in text for keyword in keywords):
+            return f"建议优先挂号：{department}。如症状加重请及时线下就医。"
     return "可先考虑全科医学科（普通内科）初诊，再由医生进行分诊。"
 
 
@@ -85,9 +85,9 @@ def check_registration_slots(department: str, appointment_date: str) -> str:
         return f"未查询到 {department} 在 {appointment_date} 的排班信息。"
 
     lines = [f"{department} 在 {appointment_date} 的排班号源："]
-    for s in schedules:
+    for schedule in schedules:
         lines.append(
-            f"医生={s.doctor_name}, 时段={s.time_of_day}, 状态={s.status}, 剩余={s.available_slots}/{s.total_slots}"
+            f"医生={schedule.doctor_name}, 时段={schedule.time_of_day}, 状态={schedule.status}, 剩余={schedule.available_slots}/{schedule.total_slots}"
         )
     return "\n".join(lines)
 
@@ -121,7 +121,6 @@ def book_appointment(
 
         schedule.available_slots -= 1
         selected_doctor = doctor or schedule.doctor_name
-        note = f"doctor={selected_doctor}"
         row = Appointment(
             user_id=user.id,
             patient_name=patient_name,
@@ -132,7 +131,7 @@ def book_appointment(
             time_of_day=normalized_time,
             appointment_time=f"{appointment_date}-{normalized_time}",
             status="BOOKED",
-            note=note,
+            note=f"doctor={selected_doctor}",
         )
         session.add(row)
         session.commit()
@@ -160,7 +159,6 @@ def cancel_appointment(
         return "取消失败：日期格式错误，请使用 YYYY-MM-DD。"
 
     normalized_time = _parse_time_of_day(time_of_day)
-    target_time = f"{appointment_date}-{normalized_time}"
 
     with SessionLocal() as session:
         user = session.query(User).filter(User.id_card == id_card).first()
@@ -218,20 +216,15 @@ def query_appointment_records(patient_name: str, id_card: str) -> str:
         if not user or user.name != patient_name:
             return "暂无匹配的预约记录。"
 
-        rows = (
-            session.query(Appointment)
-            .filter(Appointment.user_id == user.id)
-            .order_by(Appointment.id.desc())
-            .all()
-        )
+        rows = session.query(Appointment).filter(Appointment.user_id == user.id).order_by(Appointment.id.desc()).all()
 
     if not rows:
         return "暂无匹配的预约记录。"
 
     lines = []
-    for r in rows[:10]:
+    for row in rows[:10]:
         lines.append(
-            f"订单号={r.id}, 科室={r.department}, 医生={r.doctor_name}, 时间={r.appointment_time}, 状态={r.status}"
+            f"订单号={row.id}, 科室={row.department}, 医生={row.doctor_name}, 时间={row.appointment_time}, 状态={row.status}"
         )
     return "\n".join(lines)
 
