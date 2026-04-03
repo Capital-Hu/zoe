@@ -27,6 +27,10 @@
 [记忆上下文]
 {{memory_context}}
 
+[历史成功轨迹参考]
+以下是类似问题的历史成功处理轨迹，可参考其工具调用策略和回复方式，但不要照搬具体数据：
+{{trajectory_context}}
+
 [检索上下文]
 {{retrieved_context}}
 

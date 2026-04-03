@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 
 from app.agents.tools import get_agent_tools
 from app.memory.conversation_logger import ConversationLogger
+from app.memory.trajectory_store import TrajectoryStore
 from app.utils.prompt_loader import render_prompt
 
 
@@ -17,6 +18,7 @@ class ChatState(TypedDict, total=False):
     question: str
     is_first_session: bool
     memory_context: str
+    trajectory_context: str
     retrieved_context: str
     tool_trace: list[dict[str, Any]]
     answer: str
@@ -31,6 +33,7 @@ class ZoeGraph:
         self.tool_map = {tool.name: tool for tool in self.tools}
         self.tool_enabled_llm = self._bind_tools(llm)
         self.conversation_logger = ConversationLogger()
+        self.trajectory_store = TrajectoryStore()
         self.graph = self._build_graph()
 
     def _bind_tools(self, llm):
@@ -42,20 +45,33 @@ class ZoeGraph:
     def _build_graph(self):
         workflow = StateGraph(ChatState)
         workflow.add_node("load_memory", self._load_memory)
+        workflow.add_node("retrieve_trajectories", self._retrieve_trajectories)
         workflow.add_node("retrieve_docs", self._retrieve_docs)
         workflow.add_node("generate_answer", self._generate_answer)
         workflow.add_node("save_memory", self._save_memory)
+        workflow.add_node("reflect", self._reflect)
         workflow.set_entry_point("load_memory")
-        workflow.add_edge("load_memory", "retrieve_docs")
+        workflow.add_edge("load_memory", "retrieve_trajectories")
+        workflow.add_edge("retrieve_trajectories", "retrieve_docs")
         workflow.add_edge("retrieve_docs", "generate_answer")
         workflow.add_edge("generate_answer", "save_memory")
-        workflow.add_edge("save_memory", END)
+        workflow.add_edge("save_memory", "reflect")
+        workflow.add_edge("reflect", END)
         return workflow.compile()
 
     def _load_memory(self, state: ChatState) -> ChatState:
         memory_context = self.memory_store.render_context(state["memory_id"], state.get("question", ""))
         is_first_session = self.memory_store.is_first_session(state["memory_id"])
         return {"memory_context": memory_context, "is_first_session": is_first_session}
+
+    def _retrieve_trajectories(self, state: ChatState) -> ChatState:
+        try:
+            trajectory_context = self.trajectory_store.render_trajectory_context(
+                state.get("question", ""), top_k=2
+            )
+        except Exception:
+            trajectory_context = ""
+        return {"trajectory_context": trajectory_context}
 
     def _retrieve_docs(self, state: ChatState) -> ChatState:
         docs = self.retriever.retrieve(state["question"])
@@ -71,6 +87,7 @@ class ZoeGraph:
             current_date=date.today().isoformat(),
             is_first_session="是" if state.get("is_first_session", False) else "否",
             memory_context=state.get("memory_context", ""),
+            trajectory_context=state.get("trajectory_context", "") or "暂无历史轨迹",
             retrieved_context=state.get("retrieved_context", ""),
         )
         user_prompt = f"用户问题:\n{state['question']}"
@@ -138,7 +155,78 @@ class ZoeGraph:
             )
         except Exception:
             pass
+        try:
+            self.trajectory_store.annotate_and_store(
+                memory_id=state["memory_id"],
+                question=state.get("question", ""),
+                answer=state.get("answer", ""),
+                tool_trace=state.get("tool_trace", []),
+            )
+        except Exception:
+            pass
         return {}
+
+    def _reflect(self, state: ChatState) -> ChatState:
+        """Self-reflection node: evaluate the interaction and store strategy notes.
+
+        Only triggers when tool calls were made (decision-making worth reflecting on).
+        """
+        tool_trace = state.get("tool_trace", [])
+        if not tool_trace:
+            return {}
+
+        try:
+            annotation = self.trajectory_store.get_last_annotation(state["memory_id"])
+            outcome = annotation.get("outcome", "unknown") if annotation else "unknown"
+            reward = annotation.get("reward", 0.0) if annotation else 0.0
+
+            trace_text = "\n".join(
+                f"- {t.get('tool', '')}({t.get('args', {})}) → {str(t.get('result', ''))[:100]}"
+                for t in tool_trace
+            )
+            reflection_prompt = render_prompt(
+                "reflection_prompt.txt",
+                question=state.get("question", ""),
+                answer=state.get("answer", "")[:300],
+                tool_trace=trace_text,
+                outcome=outcome,
+                reward=str(reward),
+            )
+            res = self.llm.invoke([HumanMessage(content=reflection_prompt)])
+            text = res.content if isinstance(res.content, str) else str(res.content)
+
+            parsed = self._extract_json(text)
+            if not parsed:
+                return {}
+
+            strategy_notes = parsed.get("strategy_notes", [])
+            if isinstance(strategy_notes, list) and strategy_notes:
+                self.memory_store.add_strategy_notes(state["memory_id"], strategy_notes)
+
+            efficiency_score = parsed.get("efficiency_score", 0)
+            improvement = str(parsed.get("improvement", "") or "").strip()
+            if efficiency_score and isinstance(efficiency_score, int):
+                self.trajectory_store.update_reflection(
+                    memory_id=state["memory_id"],
+                    efficiency_score=efficiency_score,
+                    improvement=improvement,
+                )
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _extract_json(text: str) -> dict:
+        left = text.find("{")
+        right = text.rfind("}")
+        if left == -1 or right == -1 or right <= left:
+            return {}
+        try:
+            import json as _json
+            data = _json.loads(text[left : right + 1])
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def run(self, memory_id: str, question: str) -> str:
         result = self.graph.invoke({"memory_id": memory_id, "question": question})
@@ -147,6 +235,7 @@ class ZoeGraph:
     def run_stream(self, memory_id: str, question: str):
         state: ChatState = {"memory_id": memory_id, "question": question}
         state.update(self._load_memory(state))
+        state.update(self._retrieve_trajectories(state))
         state.update(self._retrieve_docs(state))
 
         system_prompt = render_prompt(
@@ -154,6 +243,7 @@ class ZoeGraph:
             current_date=date.today().isoformat(),
             is_first_session="是" if state.get("is_first_session", False) else "否",
             memory_context=state.get("memory_context", ""),
+            trajectory_context=state.get("trajectory_context", "") or "暂无历史轨迹",
             retrieved_context=state.get("retrieved_context", ""),
         )
         user_prompt = f"用户问题:\n{state['question']}"
@@ -228,4 +318,25 @@ class ZoeGraph:
             )
         except Exception:
             pass
+        try:
+            self.trajectory_store.annotate_and_store(
+                memory_id=memory_id,
+                question=question,
+                answer=answer,
+                tool_trace=tool_trace,
+            )
+        except Exception:
+            pass
+        # Self-reflection (async-safe: runs after [DONE] is not needed, runs before)
+        if tool_trace:
+            try:
+                reflect_state: ChatState = {
+                    "memory_id": memory_id,
+                    "question": question,
+                    "answer": answer,
+                    "tool_trace": tool_trace,
+                }
+                self._reflect(reflect_state)
+            except Exception:
+                pass
         yield "data: [DONE]\n\n"

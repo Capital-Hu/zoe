@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     mongo_memory_collection: str = Field(default="layered_memory", alias="MONGO_MEMORY_COLLECTION")
     mongo_conversation_collection: str = Field(default="conversation_sessions", alias="MONGO_CONVERSATION_COLLECTION")
     mongo_user_profile_collection: str = Field(default="user_profiles", alias="MONGO_USER_PROFILE_COLLECTION")
+    mongo_trajectory_collection: str = Field(default="trajectory_buffer", alias="MONGO_TRAJECTORY_COLLECTION")
     mongo_timeout_ms: int = Field(default=3000, alias="MONGO_TIMEOUT_MS")
 
     @property

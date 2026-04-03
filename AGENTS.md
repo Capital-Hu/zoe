@@ -10,6 +10,7 @@
 - 前端：Vue 3 + Element Plus
 - 检索：本地混合检索（FAISS 向量 + BM25）
 - 记忆：分层记忆（工作记忆、短期摘要、长期记忆）
+- In-Context RL：轨迹标注 + Experience Replay + Self-Reflection
 - 会话信息：MongoDB 持久化 + 本地 JSONL 日志双写
 - 业务数据库：SQLite
 
@@ -20,7 +21,7 @@
 - py-backend/app/agents/: LangGraph 与工具调用
 - py-backend/app/core/: 配置与安全能力
 - py-backend/app/db/: SQLAlchemy 数据库模型与会话
-- py-backend/app/memory/: 会话记忆与会话日志
+- py-backend/app/memory/: 会话记忆、会话日志与轨迹存储
 - py-backend/app/retrieval/: 混合检索
 - py-backend/app/llm/: 模型装配
 - py-backend/app/schemas/: 请求模型
@@ -115,6 +116,7 @@ npm run dev
 ### 5.2 记忆与日志
 
 - 分层记忆：MongoDB（默认库表：zoe.layered_memory）
+- 轨迹缓冲区：MongoDB（默认库表：zoe.trajectory_buffer）
 - 会话信息：MongoDB（默认库表：zoe.conversation_sessions）
 - 会话日志：py-backend/data/logs/conversation_*.jsonl（保留，便于排障和人工查看）
 

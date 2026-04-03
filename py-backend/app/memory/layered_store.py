@@ -39,6 +39,7 @@ class LayeredMemoryStore:
             "working_memory": [],
             "short_term_summary": "",
             "session_facts": [],
+            "strategy_notes": [],
             "tool_working_memory": self._default_tool_working_memory(),
             "last_compressed_at": None,
         }
@@ -84,6 +85,8 @@ class LayeredMemoryStore:
         if facts is None:
             facts = doc.get("long_term_facts", [])
         base["session_facts"] = [str(item).strip() for item in list(facts or []) if str(item).strip()]
+        raw_notes = doc.get("strategy_notes", [])
+        base["strategy_notes"] = [str(item).strip() for item in list(raw_notes or []) if str(item).strip()][:20]
         base["tool_working_memory"] = self._normalize_tool_working_memory(doc.get("tool_working_memory"))
         base["last_compressed_at"] = doc.get("last_compressed_at")
         return base
@@ -409,12 +412,25 @@ class LayeredMemoryStore:
         data["working_memory"] = data["working_memory"][-max_items:]
         self.save(memory_id, data)
 
+    def add_strategy_notes(self, memory_id: str, notes: list[str]) -> None:
+        """Append strategy notes from self-reflection, keeping the most recent ones."""
+        clean_notes = [str(n).strip() for n in notes if str(n).strip()]
+        if not clean_notes:
+            return
+        data = self.load(memory_id)
+        existing = data.get("strategy_notes", [])
+        merged = self._merge_unique(existing, clean_notes, limit=20)
+        data["strategy_notes"] = merged
+        self.save(memory_id, data)
+
     def render_context(self, memory_id: str, question: str | None = None) -> str:
         data = self.load(memory_id)
         user_profile = self.load_user_profile(memory_id)
         working_lines = [f"{message['role']}: {message['content']}" for message in data["working_memory"]]
         working_text = "\n".join(working_lines) if working_lines else "暂无"
         session_facts = "\n".join(f"- {item}" for item in data["session_facts"])
+        strategy_notes = data.get("strategy_notes", [])
+        strategy_text = "\n".join(f"- {note}" for note in strategy_notes) if strategy_notes else "- 暂无"
         profile_text = self._render_profile_text(user_profile)
         task_state = self._normalize_tool_working_memory(data.get("tool_working_memory"))
         task_text = "- 暂无"
@@ -435,6 +451,8 @@ class LayeredMemoryStore:
             f"{data['short_term_summary'] or '暂无'}\n\n"
             "[会话稳定事实]\n"
             f"{session_facts or '- 暂无'}\n\n"
+            "[策略反思笔记]\n"
+            f"{strategy_text}\n\n"
             "[函数调用工作记忆]\n"
             f"{task_text}\n\n"
             "[长期记忆检索结果]\n"

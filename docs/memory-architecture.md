@@ -33,7 +33,7 @@
 
 也就是说，短期记忆不是独立于会话记忆之外的第四层，而是会话记忆内部的一部分。
 
-## 2. 当前实际存在的 3 类存储
+## 2. 当前实际存在的 4 类存储
 
 ### 2.1 会话级分层记忆
 
@@ -47,6 +47,7 @@
 - `working_memory`：最近若干轮原始消息窗口
 - `short_term_summary`：对更早历史做的压缩摘要
 - `session_facts`：当前会话内比较稳定、后续可能复用的事实
+- `strategy_notes`：Self-Reflection 节点生成的策略经验（In-Context RL）
 - `tool_working_memory`：工具调用流程中的槽位、意图、缺失字段、最近工具调用状态
 - `last_compressed_at`：上次压缩时间
 
@@ -88,7 +89,22 @@
 - 本轮工具调用轨迹 `tool_trace`
 
 这层通常不参与“下一轮 prompt 拼装”，它更像操作日志而不是思考内存。
+### 2.4 轨迹缓冲区（In-Context RL）
 
+- 存储位置：MongoDB 集合 `zoe.trajectory_buffer`
+- 主键维度：无唯一键，按 `memory_id` + `created_at` 排序
+- 代码入口：[py-backend/app/memory/trajectory_store.py](py-backend/app/memory/trajectory_store.py)
+- 作用：存储带 reward 标注的交互轨迹，供后续检索注入
+
+每条记录包含：
+
+- `question`、`answer`：问答原文
+- `tool_trace`：工具调用记录（含 per-step reward）
+- `outcome`：交互结果分类
+- `reward`：标量奖励信号
+- `reflection`：Self-Reflection 节点的评估（efficiency_score、improvement）
+
+这一层解决的是"如何从过去的经验中学习改进"。
 ## 3. 会话记忆和短期记忆到底有什么区别
 
 这是最容易混淆的点。
@@ -102,6 +118,7 @@
 | 即时工作记忆 | `working_memory` | 最近几轮原始对话，保留细节 |
 | 压缩短期记忆 | `short_term_summary` | 对更早对话的中文摘要 |
 | 会话稳定事实 | `session_facts` | 当前会话内可复用的稳定事实 |
+| 策略反思笔记 | `strategy_notes` | Self-Reflection 节点生成的策略经验 |
 | 工具工作记忆 | `tool_working_memory` | 工具链路的槽位状态 |
 
 所以：
@@ -120,6 +137,7 @@
   - 近期原始窗口：`working_memory`
   - 压缩摘要：`short_term_summary`
   - 会话事实：`session_facts`
+  - 策略反思笔记：`strategy_notes`
   - 工具状态：`tool_working_memory`
 
 这样比把“会话记忆”和“短期记忆”并列写更清晰。
@@ -159,32 +177,32 @@
 
 ```mermaid
 flowchart TD
-    A[POST /zoe/chat] --> B[拼接 scoped memoryId]
-    B --> C[load_memory]
-    C --> C1[读取 layered_memory]
-    C --> C2[读取 user_profiles]
+  A["POST /zoe/chat"] --> B["拼接 scoped memoryId"]
+  B --> C["load_memory"]
+  C --> C1["读取 layered_memory"]
+  C --> C2["读取 user_profiles"]
     C --> C3[按问题判断是否路由长期记忆检索]
-    C1 --> D[render_context 生成 memory_context]
+  C1 --> D["render_context 生成 memory_context"]
     C2 --> D
     C3 --> D
-    D --> E[retrieve_docs]
+  D --> E["retrieve_docs"]
     E --> E1[知识库混合检索]
-    E1 --> F[generate_answer]
-    F --> F1[系统提示词注入 memory_context + retrieved_context]
+  E1 --> F["generate_answer"]
+  F --> F1["系统提示词注入 memory_context + retrieved_context"]
     F1 --> F2{是否触发工具调用}
     F2 -- 否 --> G[得到 answer]
     F2 -- 是 --> F3[执行工具]
     F3 --> F4[将 ToolMessage 回喂模型]
     F4 --> G
-    G --> H[save_memory]
-    H --> H1[add_turn 写 working_memory]
-    H --> H2[更新 tool_working_memory]
-    H --> H3[maybe_auto_compress]
-    H3 -->|达到阈值| H4[compress]
-    H4 --> H5[更新 short_term_summary]
-    H4 --> H6[更新 session_facts]
-    H4 --> H7[更新 user_profiles]
-    H4 --> H8[更新 long_term_memory_items]
+  G --> H["save_memory"]
+  H --> H1["add_turn 写 working_memory"]
+  H --> H2["更新 tool_working_memory"]
+  H --> H3["maybe_auto_compress"]
+  H3 -->|达到阈值| H4["compress"]
+  H4 --> H5["更新 short_term_summary"]
+  H4 --> H6["更新 session_facts"]
+  H4 --> H7["更新 user_profiles"]
+  H4 --> H8["更新 long_term_memory_items"]
     H --> I[log_turn 记录 JSONL + Mongo 会话日志]
     I --> J[返回回答]
 ```
@@ -194,9 +212,11 @@ flowchart TD
 图流程固定为：
 
 - `load_memory`
+- `retrieve_trajectories`（In-Context RL：检索相似高 reward 轨迹）
 - `retrieve_docs`
 - `generate_answer`
 - `save_memory`
+- `reflect`（Self-Reflection：仅在有工具调用时触发策略反思）
 
 定义在 [py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)。
 
@@ -264,14 +284,17 @@ flowchart TD
 
 下一轮回答时，真正进入系统提示词的是 `memory_context`，它由 [py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py) 中的 `render_context` 拼装。
 
-它固定包含 6 个区块，顺序如下：
+它固定包含 7 个区块，顺序如下：
 
 1. `[短期摘要]`
 2. `[会话稳定事实]`
-3. `[函数调用工作记忆]`
-4. `[长期记忆检索结果]`
-5. `[用户结构化长期记忆]`
-6. `[工作记忆]`
+3. `[策略反思笔记]`（In-Context RL：Self-Reflection 节点生成的策略经验）
+4. `[函数调用工作记忆]`
+5. `[长期记忆检索结果]`
+6. `[用户结构化长期记忆]`
+7. `[工作记忆]`
+
+此外，系统提示词中还注入了 `[历史成功轨迹参考]` 区块（由 `retrieve_trajectories` 节点从 `trajectory_buffer` 中检索填充）。
 
 也就是说，模型拿到的不是数据库原文，而是一个已经组织好的文本上下文。
 
@@ -279,10 +302,10 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[render_context(memory_id, question)] --> B[load layered_memory]
-    A --> C[load user_profiles]
+  A["render_context(memory_id, question)"] --> B["load layered_memory"]
+  A --> C["load user_profiles"]
     A --> D{是否命中长期记忆路由关键词}
-    D -- 是 --> E[BM25 检索 long_term_memory_items]
+  D -- 是 --> E["BM25 检索 long_term_memory_items"]
     D -- 否 --> F[跳过长期记忆检索]
     B --> G[短期摘要]
     B --> H[会话稳定事实]
@@ -291,7 +314,7 @@ flowchart TD
     C --> K[用户结构化长期记忆]
     E --> L[长期记忆检索结果]
     F --> L
-    G --> M[memory_context]
+  G --> M["memory_context"]
     H --> M
     I --> M
     L --> M
@@ -299,15 +322,102 @@ flowchart TD
     J --> M
 ```
 
-## 7. 自动压缩是怎么触发的
+## 7. In-Context RL：轨迹标注、回放与策略反思
 
-### 7.1 触发时机
+### 7.1 概述
+
+系统内置了一套不依赖模型权重更新的 In-Context RL 闭环。核心思路：通过在 prompt 中注入历史成功经验来持续改进工具调用策略。
+
+相关代码：
+
+- 轨迹存储：[py-backend/app/memory/trajectory_store.py](py-backend/app/memory/trajectory_store.py)
+- 反思提示词：[py-backend/prompts/reflection_prompt.txt](py-backend/prompts/reflection_prompt.txt)
+- 策略笔记字段：`layered_memory.strategy_notes`
+
+### 7.2 Reward-Annotated Experience Replay
+
+每轮交互结束后，`save_memory` 阶段调用 `TrajectoryStore.annotate_and_store()`：
+
+1. **Outcome 分类**：根据工具返回内容中的关键词分为 `success` / `failure` / `partial` / `retry_success` / `no_tool`
+2. **Reward 计算**：基于 outcome 的 base reward + 效率奖励（工具调用越少奖励越高）
+3. **Per-step Rewards**：每个工具调用独立打分，标注当步的 `step_outcome` 和 `step_reward`
+4. **存储**：完整轨迹写入 MongoDB `zoe.trajectory_buffer`
+
+下次聊天时，`retrieve_trajectories` 节点从 `trajectory_buffer` 中 BM25 检索 top-2 高 reward 轨迹，渲染成参考文本注入系统提示词的 `[历史成功轨迹参考]` 区块。
+
+### 7.3 Self-Reflection Node
+
+`save_memory` 之后执行 `reflect` 节点（仅在有工具调用时触发）：
+
+1. 用 `reflection_prompt.txt` 调用 LLM，输入当前 question、answer、tool_trace、outcome、reward
+2. LLM 输出 JSON：`efficiency_score`（1-5）、`strategy_notes`（策略经验数组）、`improvement`（改进建议）
+3. `strategy_notes` 写入 `layered_memory.strategy_notes`，下次 `render_context()` 自动注入 `[策略反思笔记]` 区块
+4. `efficiency_score` 和 `improvement` 附加到对应轨迹记录的 `reflection` 字段
+
+### 7.4 流程图
+
+```mermaid
+flowchart TD
+  A["save_memory 完成"] --> B{"本轮有工具调用?"}
+  B -- 否 --> C["跳过反思"]
+  B -- 是 --> D["annotate_and_store"]
+  D --> D1["计算 outcome + reward + step_rewards"]
+  D1 --> D2["写入 trajectory_buffer"]
+  D2 --> E["reflect 节点"]
+  E --> E1["LLM 自评: efficiency + strategy_notes + improvement"]
+  E1 --> F["strategy_notes → layered_memory"]
+  E1 --> G["efficiency + improvement → trajectory.reflection"]
+  F --> H["下次 render_context 注入策略笔记"]
+  D2 --> I["下次 retrieve_trajectories 检索高 reward 轨迹"]
+```
+
+### 7.5 数据结构
+
+`trajectory_buffer` 文档结构：
+
+```json
+{
+  "memory_id": "user_1_mem_123",
+  "user_id": 1,
+  "question": "帮我挂神经内科明天上午的号",
+  "answer": "已为您预约...",
+  "tool_trace": [
+    {
+      "tool": "book_appointment",
+      "args": {"department": "神经内科"},
+      "result_snippet": "预约成功！",
+      "step_reward": 1.0,
+      "step_outcome": "success"
+    }
+  ],
+  "tool_count": 1,
+  "outcome": "success",
+  "reward": 1.0,
+  "step_rewards": [{"tool": "book_appointment", "step_outcome": "success", "step_reward": 1.0}],
+  "reflection": {
+    "efficiency_score": 5,
+    "improvement": "",
+    "reflected_at": "2026-03-31T14:00:00"
+  },
+  "created_at": "2026-03-31T14:00:00"
+}
+```
+
+`layered_memory.strategy_notes` 示例：
+
+```json
+["用户已给出科室时无需调用recommend_department", "查号源前应确认日期格式"]
+```
+
+## 8. 自动压缩是怎么触发的
+
+### 8.1 触发时机
 
 每轮回答结束后，在 `save_memory` 阶段调用：
 
 - `maybe_auto_compress(memory_id)`
 
-### 7.2 触发条件
+### 8.2 触发条件
 
 它会把当前 `working_memory` 展平后计算总文本长度，如果达到阈值：
 
@@ -316,7 +426,7 @@ flowchart TD
 
 定义在 [py-backend/app/core/config.py](py-backend/app/core/config.py)。
 
-### 7.3 压缩时做了什么
+### 8.3 压缩时做了什么
 
 压缩逻辑在 [py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py) 的 `compress` 中，顺序如下：
 
@@ -332,27 +442,27 @@ flowchart TD
 10. 只保留最近 2 轮到 `working_memory`
 11. 更新 `last_compressed_at`
 
-### 7.4 压缩流程图
+### 8.4 压缩流程图
 
 ```mermaid
 flowchart TD
-    A[maybe_auto_compress] --> B{working_memory 总长度 >= 阈值?}
+  A["maybe_auto_compress"] --> B{"working_memory 总长度 >= 阈值?"}
     B -- 否 --> C[结束 不压缩]
-    B -- 是 --> D[compress]
-    D --> E[基于 history 生成 short_term_summary + session_facts]
-    E --> F[写回 layered_memory]
-    E --> G[session_facts 合并进 long_term_memory_items]
+  B -- 是 --> D["compress"]
+  D --> E["基于 history 生成 short_term_summary + session_facts"]
+  E --> F["写回 layered_memory"]
+  E --> G["session_facts 合并进 long_term_memory_items"]
     D --> H[抽取用户画像 delta]
-    H --> I[merge 到 user_profiles]
-    I --> J[画像条目补充进 long_term_memory_items]
-    F --> K[working_memory 只保留最近 4 条消息]
+  H --> I["merge 到 user_profiles"]
+  I --> J["画像条目补充进 long_term_memory_items"]
+  F --> K["working_memory 只保留最近 4 条消息"]
     J --> K
-    K --> L[更新 last_compressed_at]
+  K --> L["更新 last_compressed_at"]
 ```
 
-## 8. 长期记忆什么时候查，什么时候写
+## 9. 长期记忆什么时候查，什么时候写
 
-### 8.1 长期记忆查询时机
+### 9.1 长期记忆查询时机
 
 长期记忆不是每轮都全量塞给模型，而是分两种方式参与。
 
@@ -364,7 +474,11 @@ flowchart TD
 
 这部分是固定可见的。
 
-#### 方式 B：长期记忆条目检索
+#### 方式 B：高 reward 轨迹检索（In-Context RL）
+
+每轮都会执行 `retrieve_trajectories` 节点，从 `trajectory_buffer` 中 BM25 检索 top-2 相似且 reward >= 0.5 的轨迹，注入系统提示词的 `[历史成功轨迹参考]` 区块。
+
+#### 方式 C：长期记忆条目检索
 
 只有当前问题命中长期记忆路由关键词时，才会在 `long_term_memory_items` 上做 BM25 检索，结果放进：
 
@@ -387,7 +501,7 @@ flowchart TD
 
 实现位置：[py-backend/app/memory/layered_store.py](py-backend/app/memory/layered_store.py)。
 
-### 8.2 长期记忆写入时机
+### 9.2 长期记忆写入时机
 
 长期记忆条目不是每轮都写，而是在压缩时写入：
 

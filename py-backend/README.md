@@ -10,6 +10,7 @@
 - 自动记忆压缩：按 `AUTO_COMPRESS_TRIGGER_CHARS` 阈值触发，默认 2200 字符
 - 提示词外置：统一放在 `py-backend/prompts/`
 - Agent Function Calling：分导诊、查号源、预约、取消预约、记录查询
+- In-Context RL：轨迹标注 + 历史成功轨迹检索注入 + Self-Reflection 策略反思
 - 业务数据表：用户表、医生排班表、预约表（SQLite）
 
 ## 目录结构
@@ -21,7 +22,7 @@
 - `app/agents/`：LangGraph 流程和 function calling 工具
 - `app/core/`：配置、安全等基础能力
 - `app/db/`：SQLAlchemy 模型、引擎、会话
-- `app/memory/`：会话记忆与会话日志
+- `app/memory/`：会话记忆、会话日志与轨迹存储
 - `app/retrieval/`：知识库混合检索
 - `app/llm/`：聊天模型与 embedding 模型装配
 - `app/schemas/`：Pydantic 请求模型
@@ -60,6 +61,7 @@ conda run -n zoe pip install -r requirements.txt
   - `MONGO_MEMORY_COLLECTION=layered_memory`
   - `MONGO_CONVERSATION_COLLECTION=conversation_sessions`
   - `MONGO_USER_PROFILE_COLLECTION=user_profiles`
+  - `MONGO_TRAJECTORY_COLLECTION=trajectory_buffer`
   - `LONG_TERM_MEMORY_TOP_K=3`
   - `MONGO_TIMEOUT_MS=3000`
 
@@ -209,6 +211,7 @@ Agent 可调用以下工具（由后端执行）：
 - 业务数据库：`py-backend/data/zoe.db`（SQLite）
 - 分层记忆：MongoDB 集合（默认 `zoe.layered_memory`）
 - 用户结构化长期记忆：MongoDB 集合（默认 `zoe.user_profiles`，按 `user_id` 聚合）
+- 轨迹缓冲区：MongoDB 集合（默认 `zoe.trajectory_buffer`，In-Context RL 用）
 - 会话信息：MongoDB 集合（默认 `zoe.conversation_sessions`）
 - 会话日志：`py-backend/data/logs/conversation_*.jsonl`（保留，便于排障和人工查看）
 
@@ -222,6 +225,70 @@ Agent 可调用以下工具（由后端执行）：
 - 长期记忆采用轻路由：仅在问题命中“历史/继续/复诊/过敏/慢病”等记忆意图时触发 BM25 检索
 
 会话隔离策略：后端会把 `userId + memoryId` 组合成作用域 ID（例如 `user_1_mem_123`），不同账号的会话与日志天然隔离。
+
+## In-Context RL（上下文强化学习）
+
+系统内置了一套不依赖模型权重更新的 In-Context RL 闭环，通过在 prompt 中注入历史经验来持续改进 Agent 行为。
+
+### 核心组件
+
+| 组件 | 文件 | 说明 |
+|------|------|------|
+| TrajectoryStore | `app/memory/trajectory_store.py` | 轨迹存储与检索 |
+| Reflection Prompt | `prompts/reflection_prompt.txt` | 自评提示词 |
+| Strategy Notes | `layered_memory.strategy_notes` 字段 | 策略笔记（会话级） |
+
+### 工作机制
+
+#### 1. Reward-Annotated Experience Replay（轨迹标注与回放）
+
+每轮工具调用后自动标注：
+
+- **Outcome 分类**：`success` / `failure` / `partial` / `retry_success` / `no_tool`
+- **Reward 计算**：基于 outcome + 工具调用效率，范围 0.0~1.0
+- **Per-step Rewards**：每个工具调用独立打分
+- **存储**：写入 MongoDB `trajectory_buffer` 集合
+
+Reward 规则：
+
+| Outcome | Base Reward | 说明 |
+|---------|-------------|------|
+| success | 1.0 | 工具调用成功 |
+| retry_success | 0.6 | 失败后重试成功 |
+| partial | 0.5 | 部分成功 |
+| no_tool | 0.5 | 纯问答无工具调用 |
+| failure | 0.0 | 工具调用失败 |
+
+额外效率奖励：`min(0.2, 0.2 / tool_count)`，工具调用次数越少奖励越高。
+
+下次遇到类似问题时，系统从 `trajectory_buffer` 中 BM25 检索高 reward 轨迹，注入 prompt 的 `[历史成功轨迹参考]` 区块。
+
+#### 2. Self-Reflection Node（策略反思节点）
+
+`save_memory` 之后自动执行（仅在有工具调用时触发）：
+
+1. 调用 LLM 对本轮交互自评
+2. 输出 `efficiency_score`（1-5）、`strategy_notes`（策略经验）、`improvement`（改进建议）
+3. 策略笔记写入 `layered_memory.strategy_notes`，下次通过 `render_context()` 注入
+4. 效率评分和改进建议附加到对应轨迹记录
+
+#### 3. LangGraph 流程
+
+```
+load_memory → retrieve_trajectories → retrieve_docs → generate_answer → save_memory → reflect → END
+```
+
+模型每轮看到的 `memory_context` 包含 7 个区块：
+
+1. `[短期摘要]`
+2. `[会话稳定事实]`
+3. `[策略反思笔记]`
+4. `[函数调用工作记忆]`
+5. `[长期记忆检索结果]`
+6. `[用户结构化长期记忆]`
+7. `[工作记忆]`
+
+系统提示词 `chat_system_prompt.txt` 中另有 `[历史成功轨迹参考]` 注入区块。
 
 ## 常见排查
 
