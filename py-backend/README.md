@@ -176,6 +176,10 @@ sqlite3 data/zoe.db 'select id,doctor_name,department,schedule_date,time_of_day,
 
 - `POST /zoe/chat`（流式文本）
   - 入参：`{ "userId": 1, "memoryId": "123", "message": "你好" }`
+  - 前置澄清机制（代码层强约束）：
+    - 若识别到多个就医流程意图（如同时命中“预约/取消”），会先追问确认意图，不直接调用工具。
+    - 若处于挂号流程且必填字段不全（姓名/身份证/科室/日期/时段等），会先追问补齐槽位，再进入工具调用。
+    - 若上一轮已进入补槽位状态（`collecting_slots`），用户仅回复字段值（如身份证号）时会继续当前流程。
 - `POST /zoe/memory/compress`
   - 入参：`{ "userId": 1, "memoryId": "123" }`
 - `GET /zoe/sessions?userId=1`

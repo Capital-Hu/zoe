@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from queue import Empty, Queue
+from threading import Thread
 from datetime import date
 from typing import Any, TypedDict
 
@@ -8,7 +10,8 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
 from app.agents.tools import get_agent_tools
-from app.memory.conversation_logger import ConversationLogger
+from app.agents.intent_policy import build_clarification_if_needed
+from app.memory.conversation_logger import ConversationLogger, log_llm_call
 from app.memory.trajectory_store import TrajectoryStore
 from app.utils.prompt_loader import render_prompt
 
@@ -22,6 +25,7 @@ class ChatState(TypedDict, total=False):
     retrieved_context: str
     tool_trace: list[dict[str, Any]]
     answer: str
+    stream_emitter: Any
 
 
 class ZoeGraph:
@@ -59,6 +63,33 @@ class ZoeGraph:
         workflow.add_edge("reflect", END)
         return workflow.compile()
 
+    def _to_jsonable(self, value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, list):
+            return [self._to_jsonable(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): self._to_jsonable(item) for key, item in value.items()}
+        return str(value)
+
+    def _serialize_message(self, msg: Any) -> dict[str, Any]:
+        msg_type = getattr(msg, "type", msg.__class__.__name__)
+        content = getattr(msg, "content", "")
+        payload: dict[str, Any] = {
+            "type": str(msg_type),
+            "content": self._to_jsonable(content),
+        }
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            payload["tool_calls"] = self._to_jsonable(tool_calls)
+        additional_kwargs = getattr(msg, "additional_kwargs", None)
+        if additional_kwargs:
+            payload["additional_kwargs"] = self._to_jsonable(additional_kwargs)
+        return payload
+
+    def _serialize_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
+        return [self._serialize_message(msg) for msg in messages]
+
     def _load_memory(self, state: ChatState) -> ChatState:
         memory_context = self.memory_store.render_context(state["memory_id"], state.get("question", ""))
         is_first_session = self.memory_store.is_first_session(state["memory_id"])
@@ -82,6 +113,10 @@ class ZoeGraph:
         return {"retrieved_context": joined}
 
     def _generate_answer(self, state: ChatState) -> ChatState:
+        clarification = build_clarification_if_needed(self.memory_store, state["memory_id"], state.get("question", ""))
+        if clarification:
+            return {"answer": clarification, "tool_trace": []}
+
         system_prompt = render_prompt(
             "chat_system_prompt.txt",
             current_date=date.today().isoformat(),
@@ -92,10 +127,110 @@ class ZoeGraph:
         )
         user_prompt = f"用户问题:\n{state['question']}"
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+        stream_emitter = state.get("stream_emitter")
+        can_stream = callable(stream_emitter)
+        llm_rounds: list[dict[str, Any]] = []
+
+        if can_stream:
+            llm_to_use = self.tool_enabled_llm or self.llm
+            answer_parts: list[str] = []
+            tool_trace: list[dict[str, Any]] = []
+
+            max_rounds = 4
+            for _ in range(max_rounds):
+                gathered = None
+                round_tokens: list[str] = []
+
+                for chunk in llm_to_use.stream(messages):
+                    if gathered is None:
+                        gathered = chunk
+                    else:
+                        gathered = gathered + chunk
+                    if getattr(chunk, "content", None):
+                        text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                        round_tokens.append(text)
+                        stream_emitter(text)
+
+                if gathered is None:
+                    break
+
+                log_llm_call(
+                    memory_id=state["memory_id"],
+                    call_name="chat.generate_answer.stream_round",
+                    request_payload={"messages": self._serialize_messages(messages)},
+                    response_payload=self._serialize_message(gathered),
+                    metadata={"round": len(llm_rounds) + 1},
+                )
+
+                messages.append(gathered)
+                tool_calls = getattr(gathered, "tool_calls", []) or []
+                round_info: dict[str, Any] = {
+                    "round": len(llm_rounds) + 1,
+                    "assistant_message": self._serialize_message(gathered),
+                    "stream_text": "".join(round_tokens),
+                }
+                if not tool_calls:
+                    llm_rounds.append(round_info)
+                    answer_parts.extend(round_tokens)
+                    break
+
+                tool_results: list[dict[str, Any]] = []
+                for call in tool_calls:
+                    tool_name = call.get("name", "")
+                    args = call.get("args", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {"input": args}
+
+                    tool = self.tool_map.get(tool_name)
+                    if not tool:
+                        tool_result = f"工具 {tool_name} 不存在。"
+                    else:
+                        try:
+                            tool_result = str(tool.invoke(args))
+                        except Exception as exc:
+                            tool_result = f"工具 {tool_name} 执行失败：{exc}"
+
+                    tool_trace.append({"tool": tool_name, "args": args, "result": tool_result})
+                    tool_results.append({"tool": tool_name, "args": self._to_jsonable(args), "result": tool_result})
+                    messages.append(ToolMessage(content=tool_result, tool_call_id=call.get("id", "")))
+
+                round_info["tool_results"] = tool_results
+                llm_rounds.append(round_info)
+
+            answer = "".join(answer_parts).strip()
+            if not answer:
+                final_msg = llm_to_use.invoke(messages)
+                answer = final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
+                if answer:
+                    stream_emitter(answer)
+                log_llm_call(
+                    memory_id=state["memory_id"],
+                    call_name="chat.generate_answer.stream_invoke_fallback",
+                    request_payload={"messages": self._serialize_messages(messages)},
+                    response_payload=self._serialize_message(final_msg),
+                    metadata={"round": len(llm_rounds) + 1},
+                )
+                llm_rounds.append({
+                    "round": len(llm_rounds) + 1,
+                    "assistant_message": self._serialize_message(final_msg),
+                    "invoke_fallback": True,
+                })
+
+            return {"answer": answer, "tool_trace": tool_trace}
 
         if self.tool_enabled_llm is None:
             response = self.llm.invoke(messages)
             answer = response.content if isinstance(response.content, str) else str(response.content)
+            log_llm_call(
+                memory_id=state["memory_id"],
+                call_name="chat.generate_answer.single_invoke",
+                request_payload={"messages": self._serialize_messages(messages)},
+                response_payload=self._serialize_message(response),
+                metadata={"tool_enabled": False},
+            )
             return {"answer": answer}
 
         max_rounds = 4
@@ -103,12 +238,25 @@ class ZoeGraph:
         tool_trace: list[dict[str, Any]] = []
         for _ in range(max_rounds):
             ai_msg = self.tool_enabled_llm.invoke(messages)
+            log_llm_call(
+                memory_id=state["memory_id"],
+                call_name="chat.generate_answer.tool_loop_round",
+                request_payload={"messages": self._serialize_messages(messages)},
+                response_payload=self._serialize_message(ai_msg),
+                metadata={"round": len(llm_rounds) + 1},
+            )
             messages.append(ai_msg)
             tool_calls = getattr(ai_msg, "tool_calls", []) or []
+            round_info: dict[str, Any] = {
+                "round": len(llm_rounds) + 1,
+                "assistant_message": self._serialize_message(ai_msg),
+            }
             if not tool_calls:
+                llm_rounds.append(round_info)
                 answer = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
                 break
 
+            tool_results: list[dict[str, Any]] = []
             for call in tool_calls:
                 tool_name = call.get("name", "")
                 args = call.get("args", {})
@@ -128,11 +276,27 @@ class ZoeGraph:
                         tool_result = f"工具 {tool_name} 执行失败：{exc}"
 
                 tool_trace.append({"tool": tool_name, "args": args, "result": tool_result})
+                tool_results.append({"tool": tool_name, "args": self._to_jsonable(args), "result": tool_result})
                 messages.append(ToolMessage(content=tool_result, tool_call_id=call.get("id", "")))
+
+            round_info["tool_results"] = tool_results
+            llm_rounds.append(round_info)
 
         if not answer:
             final_msg = self.tool_enabled_llm.invoke(messages)
             answer = final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
+            log_llm_call(
+                memory_id=state["memory_id"],
+                call_name="chat.generate_answer.tool_loop_invoke_fallback",
+                request_payload={"messages": self._serialize_messages(messages)},
+                response_payload=self._serialize_message(final_msg),
+                metadata={"round": len(llm_rounds) + 1},
+            )
+            llm_rounds.append({
+                "round": len(llm_rounds) + 1,
+                "assistant_message": self._serialize_message(final_msg),
+                "invoke_fallback": True,
+            })
 
         return {"answer": answer, "tool_trace": tool_trace}
 
@@ -194,6 +358,13 @@ class ZoeGraph:
             )
             res = self.llm.invoke([HumanMessage(content=reflection_prompt)])
             text = res.content if isinstance(res.content, str) else str(res.content)
+            log_llm_call(
+                memory_id=state["memory_id"],
+                call_name="chat.reflect.invoke",
+                request_payload={"prompt": reflection_prompt},
+                response_payload={"content": text},
+                metadata={"tool_trace_count": len(tool_trace), "outcome": outcome, "reward": reward},
+            )
 
             parsed = self._extract_json(text)
             if not parsed:
@@ -233,110 +404,46 @@ class ZoeGraph:
         return result.get("answer", "")
 
     def run_stream(self, memory_id: str, question: str):
-        state: ChatState = {"memory_id": memory_id, "question": question}
-        state.update(self._load_memory(state))
-        state.update(self._retrieve_trajectories(state))
-        state.update(self._retrieve_docs(state))
+        events: Queue[tuple[str, str]] = Queue()
+        emitted = {"count": 0}
 
-        system_prompt = render_prompt(
-            "chat_system_prompt.txt",
-            current_date=date.today().isoformat(),
-            is_first_session="是" if state.get("is_first_session", False) else "否",
-            memory_context=state.get("memory_context", ""),
-            trajectory_context=state.get("trajectory_context", "") or "暂无历史轨迹",
-            retrieved_context=state.get("retrieved_context", ""),
-        )
-        user_prompt = f"用户问题:\n{state['question']}"
-        messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+        def stream_emitter(token: str) -> None:
+            if not token:
+                return
+            emitted["count"] += 1
+            events.put(("token", token))
 
-        llm_to_use = self.tool_enabled_llm or self.llm
-        answer_parts: list[str] = []
-        tool_trace: list[dict[str, Any]] = []
-
-        max_rounds = 4
-        for _ in range(max_rounds):
-            gathered = None
-            round_tokens: list[str] = []
-
-            for chunk in llm_to_use.stream(messages):
-                if gathered is None:
-                    gathered = chunk
-                else:
-                    gathered = gathered + chunk
-                if getattr(chunk, "content", None):
-                    text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                    round_tokens.append(text)
-                    yield f"data: {json.dumps({'token': text}, ensure_ascii=False)}\n\n"
-
-            if gathered is None:
-                break
-
-            messages.append(gathered)
-            tool_calls = getattr(gathered, "tool_calls", []) or []
-            if not tool_calls:
-                answer_parts.extend(round_tokens)
-                break
-
-            for call in tool_calls:
-                tool_name = call.get("name", "")
-                args = call.get("args", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {"input": args}
-
-                tool = self.tool_map.get(tool_name)
-                if not tool:
-                    tool_result = f"工具 {tool_name} 不存在。"
-                else:
-                    try:
-                        tool_result = str(tool.invoke(args))
-                    except Exception as exc:
-                        tool_result = f"工具 {tool_name} 执行失败：{exc}"
-
-                tool_trace.append({"tool": tool_name, "args": args, "result": tool_result})
-                messages.append(ToolMessage(content=tool_result, tool_call_id=call.get("id", "")))
-
-        answer = "".join(answer_parts).strip()
-        if not answer:
-            final_msg = llm_to_use.invoke(messages)
-            answer = final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
-            if answer:
-                yield f"data: {json.dumps({'token': answer}, ensure_ascii=False)}\n\n"
-
-        self.memory_store.add_turn(memory_id, question, answer, tool_trace=tool_trace)
-        self.memory_store.maybe_auto_compress(memory_id)
-        try:
-            self.conversation_logger.log_turn(
-                memory_id=memory_id,
-                question=question,
-                answer=answer,
-                memory_context=state.get("memory_context", ""),
-                retrieved_context=state.get("retrieved_context", ""),
-                tool_trace=tool_trace,
-            )
-        except Exception:
-            pass
-        try:
-            self.trajectory_store.annotate_and_store(
-                memory_id=memory_id,
-                question=question,
-                answer=answer,
-                tool_trace=tool_trace,
-            )
-        except Exception:
-            pass
-        # Self-reflection (async-safe: runs after [DONE] is not needed, runs before)
-        if tool_trace:
+        def worker() -> None:
             try:
-                reflect_state: ChatState = {
-                    "memory_id": memory_id,
-                    "question": question,
-                    "answer": answer,
-                    "tool_trace": tool_trace,
-                }
-                self._reflect(reflect_state)
+                result = self.graph.invoke(
+                    {"memory_id": memory_id, "question": question, "stream_emitter": stream_emitter}
+                )
+                answer = result.get("answer", "") if isinstance(result, dict) else ""
+                if answer and emitted["count"] == 0:
+                    events.put(("token", answer))
             except Exception:
-                pass
+                events.put(("error", ""))
+            finally:
+                events.put(("done", ""))
+
+        t = Thread(target=worker, daemon=True)
+        t.start()
+
+        while True:
+            try:
+                event, payload = events.get(timeout=0.2)
+            except Empty:
+                if t.is_alive():
+                    continue
+                break
+
+            if event == "token":
+                yield f"data: {json.dumps({'token': payload}, ensure_ascii=False)}\n\n"
+                continue
+            if event == "error":
+                yield f"data: {json.dumps({'token': '系统繁忙，请稍后再试。'}, ensure_ascii=False)}\n\n"
+                continue
+            if event == "done":
+                break
+
         yield "data: [DONE]\n\n"

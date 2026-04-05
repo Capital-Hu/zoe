@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage
 from rank_bm25 import BM25Okapi
 
 from app.core.config import settings
+from app.memory.conversation_logger import log_llm_call
 from app.utils.prompt_loader import render_prompt
 
 
@@ -381,6 +382,13 @@ class LayeredMemoryStore:
         )
         res = self.llm.invoke([HumanMessage(content=prompt)])
         text = res.content if isinstance(res.content, str) else str(res.content)
+        log_llm_call(
+            memory_id=memory_id,
+            call_name="memory.user_profile_extract.invoke",
+            request_payload={"prompt": prompt},
+            response_payload={"content": text},
+            metadata={"history_chars": len(history)},
+        )
         return self._extract_json_object(text)
 
     def _merge_user_profile(self, memory_id: str, delta: dict) -> None:
@@ -487,6 +495,13 @@ class LayeredMemoryStore:
         prompt = render_prompt("memory_compress_prompt.txt", history=history)
         res = self.llm.invoke([HumanMessage(content=prompt)])
         text = res.content if isinstance(res.content, str) else str(res.content)
+        log_llm_call(
+            memory_id=memory_id,
+            call_name="memory.compress.invoke",
+            request_payload={"prompt": prompt},
+            response_payload={"content": text},
+            metadata={"history_chars": len(history)},
+        )
 
         summary = ""
         facts: list[str] = []

@@ -150,18 +150,18 @@ const scrollToBottom = () => {
   }
 };
 
-const hello = () => {
+const hello = async () => {
   if (!currentUser.value) return;
-  sendRequest('你好');
+  await sendRequest('你好');
 };
 
-const sendMessage = () => {
+const sendMessage = async () => {
   if (!currentUser.value) {
     ElMessage.warning('请先登录');
     return;
   }
   if (inputMessage.value.trim()) {
-    sendRequest(inputMessage.value.trim());
+    await sendRequest(inputMessage.value.trim());
     inputMessage.value = '';
   }
 };
@@ -266,7 +266,7 @@ const newChat = async () => {
   uuid.value = nextId;
   localStorage.setItem(memoryKey(), nextId);
   messages.value = [];
-  hello();
+  await hello();
   await loadSessions();
 };
 
@@ -317,10 +317,10 @@ const loadSessions = async () => {
       params: { userId: currentUser.value.userId },
     });
     sessions.value = (res.data?.sessions || []).map((item) => ({
-      memoryId: String(item.memoryId),
+      memoryId: String(item.memoryId || item.memory_suffix || item.memory_id || ''),
       title: item.title,
       turns: item.turns || 0,
-      updatedAt: item.updatedAt,
+      updatedAt: item.updatedAt || item.updated_at,
     }));
   } catch (error) {
     console.error('加载会话列表失败:', error);
@@ -346,14 +346,13 @@ const openSession = async (memoryId, silent = false) => {
       isThinking: false,
     }));
     if (!messages.value.length) {
-      hello();
+      await hello();
     }
   } catch {
     messages.value = [];
     if (!silent) {
-      ElMessage.warning('会话不存在，已为你创建新会话');
+      ElMessage.error('会话加载失败，请刷新后重试');
     }
-    hello();
   } finally {
     isSessionOpening.value = false;
   }

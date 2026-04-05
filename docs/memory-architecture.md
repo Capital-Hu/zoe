@@ -26,6 +26,8 @@
 - 用户级长期结构记忆按 userId 隔离，跨会话复用
 - 对话日志单独存，主要用于回放、排障、历史查询，不直接作为下一轮 prompt 的主输入
 
+另外，系统还维护了一层“工具工作记忆” `tool_working_memory`，它不是普通日志字段，而是一个会跨轮次持久化的流程状态机，用来记录当前意图、已收集槽位、缺失槽位和补槽阶段。
+
 更准确的理解应该是：
 
 - 会话记忆 = 当前会话的一整套状态
@@ -48,7 +50,7 @@
 - `short_term_summary`：对更早历史做的压缩摘要
 - `session_facts`：当前会话内比较稳定、后续可能复用的事实
 - `strategy_notes`：Self-Reflection 节点生成的策略经验（In-Context RL）
-- `tool_working_memory`：工具调用流程中的槽位、意图、缺失字段、最近工具调用状态
+- `tool_working_memory`：工具调用流程中的槽位、意图、缺失字段、最近工具调用状态，以及前置意图路由状态
 - `last_compressed_at`：上次压缩时间
 
 这是主 memory。下一轮问答时，系统优先读取的就是这里。
@@ -119,7 +121,7 @@
 | 压缩短期记忆 | `short_term_summary` | 对更早对话的中文摘要 |
 | 会话稳定事实 | `session_facts` | 当前会话内可复用的稳定事实 |
 | 策略反思笔记 | `strategy_notes` | Self-Reflection 节点生成的策略经验 |
-| 工具工作记忆 | `tool_working_memory` | 工具链路的槽位状态 |
+| 工具工作记忆 | `tool_working_memory` | 工具链路的槽位状态 + 意图路由状态 |
 
 所以：
 
@@ -231,6 +233,13 @@ flowchart TD
 1. 调用 `memory_store.render_context(memory_id, question)` 生成 `memory_context`
 2. 调用 `memory_store.is_first_session(memory_id)` 判断是否首次会话
 
+在进入主 LLM 之前，`py-backend/app/agents/intent_policy.py` 还会基于 `tool_working_memory` 做前置意图路由：
+
+1. 先读取上一轮状态（`intent`、`status`、`collected_fields`）
+2. 再结合当前话术、最近工作记忆和受限路由模型判断是否继续当前流程
+3. 如果缺槽位，直接返回固定追问，并把最新状态持久化回 memory
+4. 如果是短闲聊（如“谢谢”“好的”）：活跃流程中保持状态不变，空闲流程回到 `idle`
+
 其中 `render_context` 内部会：
 
 1. 从 `layered_memory` 读取当前会话文档
@@ -270,6 +279,8 @@ flowchart TD
 4. 回喂给模型继续推理
 5. 所有工具调用都会累积到 `tool_trace`
 
+注意：如果前置意图路由已经判断“当前仍处于某个就医流程，但槽位不全”，这里会在真正进入主生成前短路返回追问，不会把这个问题交给大模型重新组织一遍。
+
 ### 5.4 save_memory
 
 位置：[py-backend/app/agents/graph.py](py-backend/app/agents/graph.py)
@@ -279,6 +290,15 @@ flowchart TD
 1. `add_turn`：写入本轮问答到 `working_memory`
 2. `maybe_auto_compress`：按阈值决定是否压缩
 3. `log_turn`：将完整过程写入会话日志
+
+同时，`tool_working_memory` 也会随着 `add_turn(...)` 一起更新，常见字段包括：
+
+- `intent`：当前就医流程意图
+- `required_fields`：该流程所需必填字段
+- `collected_fields`：已收集字段
+- `missing_fields`：尚未补齐字段
+- `status`：`idle` / `collecting_slots` / `ready` / `tool_called`
+- `last_tool_calls`：最近几次工具调用
 
 ## 6. 模型每轮到底看到什么 memory
 
@@ -297,6 +317,8 @@ flowchart TD
 此外，系统提示词中还注入了 `[历史成功轨迹参考]` 区块（由 `retrieve_trajectories` 节点从 `trajectory_buffer` 中检索填充）。
 
 也就是说，模型拿到的不是数据库原文，而是一个已经组织好的文本上下文。
+
+此外，`tool_working_memory` 不仅影响上下文拼装，还影响下一轮的前置路由：即使用户没有再说“预约/挂号”这些关键词，只要上一轮已经进入对应流程，系统也会优先把它识别成同一个 intent。
 
 ### 6.1 render_context 结构图
 
@@ -408,6 +430,24 @@ flowchart TD
 ```json
 ["用户已给出科室时无需调用recommend_department", "查号源前应确认日期格式"]
 ```
+
+### 7.6 `tool_working_memory` 的状态机语义
+
+`tool_working_memory` 现在是这套记忆里最关键的流程状态字段之一，它会在前置意图路由和 `add_turn(...)` 时持续更新。
+
+常见状态含义：
+
+- `collecting_slots`：已经识别到流程，但必填字段还没收齐
+- `ready`：槽位已收齐，下一步可以进入工具调用
+- `tool_called`：本轮已经完成过一次工具调用，后续还可继续沿用同一流程
+- `idle`：当前不处于活跃流程
+
+短闲聊处理语义：
+
+- 若当前处于活跃流程（如 `collecting_slots`），用户发送“谢谢/好的/嗯”不会打断意图状态。
+- 若当前不处于活跃流程，短闲聊会把状态保持/重置为 `idle`。
+
+这意味着，系统不再只依赖关键词重新判断“你现在在做什么”，而是把“当前流程状态”显式存下来。
 
 ## 8. 自动压缩是怎么触发的
 
@@ -575,6 +615,7 @@ flowchart TD
 - 会话级与用户级做了明确隔离
 - 会话内同时保留原始窗口和压缩摘要，兼顾细节与成本
 - 工具调用状态被单独建模，适合预约、取消、查号源这类槽位任务
+- 前置意图路由依赖可持久化状态，而不是只看关键词，能保证多轮补槽连续性
 - 长期记忆只在压缩后沉淀，避免把噪音过早写入长期层
 - 日志层和推理 memory 解耦，职责清晰
 
